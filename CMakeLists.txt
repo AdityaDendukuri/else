@@ -19,14 +19,6 @@ target_include_directories(else
     $<INSTALL_INTERFACE:include>
 )
 
-include(FetchContent)
-FetchContent_Declare(
-    numerics
-    SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../numerics"
-)
-FetchContent_MakeAvailable(numerics)
-target_link_libraries(else INTERFACE numerics::solvers)
-
 enable_testing()
 add_subdirectory(tests)
 add_subdirectory(benchmarks)

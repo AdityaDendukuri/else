@@ -1,5 +1,6 @@
 #pragma once
 
+#include "else/linalg.hpp"
 #include "else/subnetwork.hpp"
 #include "else/types.hpp"
 #include <algorithm>
@@ -13,16 +14,16 @@ namespace else_sim {
 template <typename Float = double, typename Index = std::size_t, typename State = std::vector<int>>
 inline std::vector<Float>
 compute_expected_visits_losses(const Subnetwork<Float, Index, State> &subnetwork,
-                               const num::Vector &occupation) {
+                               const std::vector<Float> &occupation) {
     const Index n = subnetwork.size();
     const auto &column_sums = subnetwork.inverse_column_sums();
     const auto &R = subnetwork.generator();
 
     std::vector<Float> losses(n, static_cast<Float>(0));
     for (Index i = 0; i < n; ++i) {
-        const double rate = -R(i, i);
-        const double w_i = (i < column_sums.size()) ? column_sums[i] : 1.0;
-        losses[i] = static_cast<Float>(std::max(0.0, occupation[i] * rate * w_i));
+        const Float rate = -R(i, i);
+        const Float w_i = (i < column_sums.size()) ? column_sums[i] : static_cast<Float>(1);
+        losses[i] = std::max(static_cast<Float>(0), occupation[i] * rate * w_i);
     }
     return losses;
 }
@@ -32,47 +33,47 @@ compute_expected_visits_losses(const Subnetwork<Float, Index, State> &subnetwork
 template <typename Float = double, typename Index = std::size_t, typename State = std::vector<int>>
 inline std::vector<Float>
 compute_symmetrized_losses(const Subnetwork<Float, Index, State> &subnetwork,
-                           const num::Vector &occupation) {
+                           const std::vector<Float> &occupation) {
     const Index n = subnetwork.size();
     const auto &column_sums = subnetwork.inverse_column_sums();
     const auto &R = subnetwork.generator();
     const auto weights = subnetwork.stationary_weights();
 
-    num::Matrix S(n, n, 0.0);
+    Matrix<Float> S(n, n, static_cast<Float>(0));
     for (Index i = 0; i < n; ++i) {
-        const double h_i = (!weights.empty() && i < weights.size()) ? weights[i] : 1.0;
+        const Float h_i = (!weights.empty() && i < weights.size()) ? weights[i] : static_cast<Float>(1);
         for (Index j = 0; j < n; ++j) {
-            const double h_j = (!weights.empty() && j < weights.size()) ? weights[j] : 1.0;
-            const double r_ij = (h_i / std::max(1e-12, h_j)) * (-R(i, j));
-            const double r_ji = (h_j / std::max(1e-12, h_i)) * (-R(j, i));
-            S(i, j) = 0.5 * (r_ij + r_ji);
+            const Float h_j = (!weights.empty() && j < weights.size()) ? weights[j] : static_cast<Float>(1);
+            const Float r_ij = (h_i / std::max(static_cast<Float>(1e-12), h_j)) * (-R(i, j));
+            const Float r_ji = (h_j / std::max(static_cast<Float>(1e-12), h_i)) * (-R(j, i));
+            S(i, j) = static_cast<Float>(0.5) * (r_ij + r_ji);
         }
     }
     for (Index i = 0; i < n; ++i) {
-        double row_sum = 0.0;
+        Float row_sum = static_cast<Float>(0);
         for (Index j = 0; j < n; ++j) {
             if (i != j) {
                 row_sum += std::abs(S(i, j));
             }
         }
-        S(i, i) = std::max(S(i, i), row_sum + 1e-6);
+        S(i, i) = std::max(S(i, i), row_sum + static_cast<Float>(1e-6));
     }
 
-    auto chol = num::cholesky(num::assume_spd(std::move(S)));
+    auto chol = factorize_cholesky(std::move(S));
     if (!chol.success) {
         return compute_expected_visits_losses(subnetwork, occupation);
     }
 
     std::vector<Float> losses(n, static_cast<Float>(0));
-    num::Vector e(n, 0.0);
-    num::Vector z(n, 0.0);
+    std::vector<Float> e(n, static_cast<Float>(0));
+    std::vector<Float> z(n, static_cast<Float>(0));
     for (Index i = 0; i < n; ++i) {
-        e[i] = 1.0;
-        num::cholesky_solve(chol, e, z);
-        e[i] = 0.0;
-        const double diag = std::max(z[i], 1e-12);
-        const double w_i = (i < column_sums.size()) ? column_sums[i] : 1.0;
-        losses[i] = static_cast<Float>(std::max(0.0, occupation[i] * (w_i / diag)));
+        e[i] = static_cast<Float>(1);
+        cholesky_solve(chol, e, z);
+        e[i] = static_cast<Float>(0);
+        const Float diag = std::max(z[i], static_cast<Float>(1e-12));
+        const Float w_i = (i < column_sums.size()) ? column_sums[i] : static_cast<Float>(1);
+        losses[i] = std::max(static_cast<Float>(0), occupation[i] * (w_i / diag));
     }
     return losses;
 }
@@ -81,7 +82,7 @@ compute_symmetrized_losses(const Subnetwork<Float, Index, State> &subnetwork,
 template <typename Float = double, typename Index = std::size_t, typename State = std::vector<int>>
 inline std::vector<Float>
 compute_shedding_losses(const Subnetwork<Float, Index, State> &subnetwork,
-                        const num::Vector &occupation,
+                        const std::vector<Float> &occupation,
                         const SheddingOptions<Index, Float> &options = {},
                         SheddingDiagnostics<Index, Float> *diagnostics = nullptr) {
     const Index n = subnetwork.size();
@@ -122,7 +123,7 @@ compute_shedding_losses(const Subnetwork<Float, Index, State> &subnetwork,
 template <typename Float = double, typename Index = std::size_t, typename State = std::vector<int>>
 inline SheddingResult<Index, Float>
 shed_states(const Subnetwork<Float, Index, State> &subnetwork,
-            const num::Vector &occupation,
+            const std::vector<Float> &occupation,
             const std::vector<Index> &protected_states = {},
             const SheddingOptions<Index, Float> &options = {}) {
     const Index n = subnetwork.size();

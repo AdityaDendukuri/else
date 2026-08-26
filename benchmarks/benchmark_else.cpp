@@ -7,7 +7,7 @@
 
 int main() {
     std::cout << "========================================================================\n";
-    std::cout << "          ELSE PURE TEMPLATE LIBRARY: NUMERICAL BENCHMARK               \n";
+    std::cout << "     ELSE PURE TEMPLATE LIBRARY (ZERO DEPENDENCIES): BENCHMARK          \n";
     std::cout << "========================================================================\n\n";
 
     constexpr std::size_t n = 40;
@@ -17,7 +17,7 @@ int main() {
     std::vector<std::vector<int>> states(n);
     for (std::size_t i = 0; i < n; ++i) states[i] = {static_cast<int>(i)};
 
-    std::vector<num::idx> rows, cols;
+    std::vector<std::size_t> rows, cols;
     std::vector<double> vals;
     std::vector<else_sim::BoundaryTransition<std::size_t, std::vector<int>, double>> boundary;
 
@@ -41,7 +41,7 @@ int main() {
         // Diagonal: -col_sum
         rows.push_back(j); cols.push_back(j); vals.push_back(-col_sum);
     }
-    auto R = num::SparseMatrix::from_triplets(n, n, rows, cols, vals);
+    auto R = else_sim::SparseMatrix<double>::from_triplets(n, n, rows, cols, vals);
 
     // Stationary Poisson weights for reversible scaling: h_j = sqrt(pi_j)
     std::vector<double> h(n, 1.0);
@@ -53,7 +53,7 @@ int main() {
         states, std::move(R), std::move(boundary), h
     );
 
-    num::Vector p0(n, 0.0);
+    std::vector<double> p0(n, 0.0);
     p0[0] = 1.0;
     const auto u = subnetwork.occupation(p0);
 
@@ -90,6 +90,6 @@ int main() {
                   << std::setw(16) << (std::to_string(static_cast<int>(speedup)) + " x")
                   << std::setw(18) << std::scientific << std::setprecision(2) << diff << "\n";
     }
-    std::cout << "\n[SUCCESS] Pure template ELSE benchmark completed.\n";
+    std::cout << "\n[SUCCESS] Pure template zero-dependency ELSE benchmark completed.\n";
     return 0;
 }
