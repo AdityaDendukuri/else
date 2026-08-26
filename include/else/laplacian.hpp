@@ -7,6 +7,7 @@
 #include <queue>
 #include <random>
 #include <stdexcept>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -55,7 +56,7 @@ laplacian_neighborhood(const SparseMat &laplacian,
 
     while (states.size() < cap) {
         if (frontier.empty()) {
-            throw std::invalid_argument("initial component is smaller than the requested capacity");
+            break;
         }
         const std::size_t state = frontier.top().second;
         frontier.pop();
@@ -79,65 +80,71 @@ laplacian_restrictions(const SparseMat &laplacian,
     }
 
     const std::size_t n_rows = matrix_rows_helper(laplacian);
-    auto states_idx = laplacian_neighborhood(laplacian, stationary_sqrt, initial, capacity);
-    std::vector<bool> included(n_rows, false);
-    for (std::size_t s : states_idx) included[s] = true;
+    std::vector<std::size_t> current_states = laplacian_neighborhood(laplacian, stationary_sqrt, initial, capacity);
+    std::unordered_set<std::size_t> all_included(current_states.begin(), current_states.end());
 
     std::vector<Subnetwork<Float, std::size_t, State>> subnetworks;
     subnetworks.reserve(static_cast<std::size_t>(count));
 
     for (int step = 0; step < count; ++step) {
-        const std::size_t n = states_idx.size();
+        const std::size_t n = current_states.size();
         std::unordered_map<std::size_t, std::size_t> local_map;
         std::vector<State> sub_states;
         sub_states.reserve(n);
         for (std::size_t i = 0; i < n; ++i) {
-            local_map[states_idx[i]] = i;
-            sub_states.push_back(State{static_cast<int>(states_idx[i])});
+            local_map[current_states[i]] = i;
+            sub_states.push_back(State{static_cast<int>(current_states[i])});
         }
 
         std::vector<std::size_t> r_rows, r_cols;
         std::vector<Float> r_vals;
         std::vector<BoundaryTransition<std::size_t, State, Float>> boundary;
         std::vector<Float> local_h(n);
-        for (std::size_t i = 0; i < n; ++i) local_h[i] = stationary_sqrt[states_idx[i]];
+        for (std::size_t i = 0; i < n; ++i) local_h[i] = stationary_sqrt[current_states[i]];
 
-        for (std::size_t j = 0; j < n; ++j) {
-            const std::size_t global_j = states_idx[j];
-            Float col_sum = static_cast<Float>(0);
-            const auto row_begin = laplacian.row_ptr()[global_j];
-            const auto row_end = laplacian.row_ptr()[global_j + 1];
-            for (auto k = row_begin; k < row_end; ++k) {
-                const std::size_t global_i = static_cast<std::size_t>(laplacian.col_idx()[k]);
-                if (global_i == global_j) continue;
-                const Float rate = static_cast<Float>(laplacian.values()[k]);
-                auto it = local_map.find(global_i);
+        for (std::size_t local_column = 0; local_column < n; ++local_column) {
+            const std::size_t global_column = current_states[local_column];
+            const auto row_begin = laplacian.row_ptr()[global_column];
+            const auto row_end = laplacian.row_ptr()[global_column + 1];
+
+            for (auto entry = row_begin; entry < row_end; ++entry) {
+                const std::size_t global_row = static_cast<std::size_t>(laplacian.col_idx()[entry]);
+                if (global_row == global_column) {
+                    r_rows.push_back(local_column);
+                    r_cols.push_back(local_column);
+                    r_vals.push_back(-static_cast<Float>(laplacian.values()[entry]));
+                    continue;
+                }
+                const Float rate = -static_cast<Float>(laplacian.values()[entry]) *
+                                   stationary_sqrt[global_row] / stationary_sqrt[global_column];
+                if (rate <= static_cast<Float>(0)) continue;
+
+                auto it = local_map.find(global_row);
                 if (it != local_map.end()) {
                     r_rows.push_back(it->second);
-                    r_cols.push_back(j);
+                    r_cols.push_back(local_column);
                     r_vals.push_back(rate);
                 } else {
-                    boundary.push_back({j, State{static_cast<int>(global_i)}, rate});
+                    boundary.push_back({local_column, State{static_cast<int>(global_row)}, rate});
                 }
-                col_sum += rate;
             }
-            r_rows.push_back(j);
-            r_cols.push_back(j);
-            r_vals.push_back(-col_sum);
         }
 
         auto R = SparseMatrix<Float, std::size_t>::from_triplets(n, n, r_rows, r_cols, r_vals);
         subnetworks.emplace_back(std::move(sub_states), std::move(R), std::move(boundary), std::move(local_h));
 
-        if (subnetworks.back().boundary().empty()) break;
+        if (step + 1 == count || subnetworks.back().boundary().empty()) break;
 
+        // Build next layer starting from boundary states
+        std::vector<std::size_t> next_layer_states;
         for (const auto &trans : subnetworks.back().boundary()) {
             const std::size_t g_dest = static_cast<std::size_t>(trans.destination[0]);
-            if (!included[g_dest]) {
-                included[g_dest] = true;
-                states_idx.push_back(g_dest);
+            if (all_included.insert(g_dest).second) {
+                next_layer_states.push_back(g_dest);
             }
         }
+        if (next_layer_states.empty()) break;
+        current_states = std::move(next_layer_states);
     }
     return subnetworks;
 }
@@ -166,47 +173,51 @@ laplacian_else_trajectory(const ReversibleLaplacianType &generator,
 
     for (; completed_steps < options.maximum_steps && time < final_time; ++completed_steps) {
         const auto states = laplacian_neighborhood(laplacian, stationary_sqrt, current, options.capacity);
-        const Index n = states.size();
-        std::unordered_map<Index, Index> local_map;
+        const std::size_t n = states.size();
+        std::unordered_map<std::size_t, std::size_t> local_map;
         std::vector<State> sub_states;
         sub_states.reserve(n);
-        for (Index i = 0; i < n; ++i) {
+        for (std::size_t i = 0; i < n; ++i) {
             local_map[states[i]] = i;
             sub_states.push_back(State{static_cast<int>(states[i])});
         }
 
-        std::vector<Index> r_rows, r_cols;
+        std::vector<std::size_t> r_rows, r_cols;
         std::vector<Float> r_vals;
-        std::vector<BoundaryTransition<Index, State, Float>> boundary;
+        std::vector<BoundaryTransition<std::size_t, State, Float>> boundary;
         std::vector<Float> local_h(n);
-        for (Index i = 0; i < n; ++i) local_h[i] = stationary_sqrt[states[i]];
+        for (std::size_t i = 0; i < n; ++i) local_h[i] = stationary_sqrt[states[i]];
 
-        for (Index j = 0; j < n; ++j) {
-            const Index global_j = states[j];
-            Float col_sum = static_cast<Float>(0);
-            const auto row_begin = laplacian.row_ptr()[global_j];
-            const auto row_end = laplacian.row_ptr()[global_j + 1];
-            for (auto k = row_begin; k < row_end; ++k) {
-                const Index global_i = laplacian.col_idx()[k];
-                if (global_i == global_j) continue;
-                const Float rate = laplacian.values()[k];
-                auto it = local_map.find(global_i);
+        for (std::size_t local_column = 0; local_column < n; ++local_column) {
+            const std::size_t global_column = states[local_column];
+            const auto row_begin = laplacian.row_ptr()[global_column];
+            const auto row_end = laplacian.row_ptr()[global_column + 1];
+
+            for (auto entry = row_begin; entry < row_end; ++entry) {
+                const std::size_t global_row = static_cast<std::size_t>(laplacian.col_idx()[entry]);
+                if (global_row == global_column) {
+                    r_rows.push_back(local_column);
+                    r_cols.push_back(local_column);
+                    r_vals.push_back(-static_cast<Float>(laplacian.values()[entry]));
+                    continue;
+                }
+                const Float rate = -static_cast<Float>(laplacian.values()[entry]) *
+                                   stationary_sqrt[global_row] / stationary_sqrt[global_column];
+                if (rate <= static_cast<Float>(0)) continue;
+
+                auto it = local_map.find(global_row);
                 if (it != local_map.end()) {
                     r_rows.push_back(it->second);
-                    r_cols.push_back(j);
+                    r_cols.push_back(local_column);
                     r_vals.push_back(rate);
                 } else {
-                    boundary.push_back({j, State{static_cast<int>(global_i)}, rate});
+                    boundary.push_back({local_column, State{static_cast<int>(global_row)}, rate});
                 }
-                col_sum += rate;
             }
-            r_rows.push_back(j);
-            r_cols.push_back(j);
-            r_vals.push_back(-col_sum);
         }
 
-        auto R = SparseMatrix<Float, Index>::from_triplets(n, n, r_rows, r_cols, r_vals);
-        Subnetwork<Float, Index, State> subnetwork(std::move(sub_states), std::move(R), std::move(boundary), std::move(local_h));
+        auto R = SparseMatrix<Float, std::size_t>::from_triplets(n, n, r_rows, r_cols, r_vals);
+        Subnetwork<Float, std::size_t, State> subnetwork(std::move(sub_states), std::move(R), std::move(boundary), std::move(local_h));
         if (subnetwork.boundary_states().empty()) break;
 
         Matrix<Float> source(subnetwork.size(), 1, static_cast<Float>(0));
@@ -216,7 +227,7 @@ laplacian_else_trajectory(const ReversibleLaplacianType &generator,
         const auto exit_probs = subnetwork.exit_probabilities(integrals);
 
         std::discrete_distribution<std::size_t> dist(exit_probs.begin(), exit_probs.end());
-        const Index local_exit = subnetwork.boundary_states()[dist(random)];
+        const std::size_t local_exit = subnetwork.boundary_states()[dist(random)];
         const Float waiting_time = subnetwork.conditional_exit_time(integrals, local_exit);
 
         std::vector<Index> destinations;

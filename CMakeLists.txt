@@ -29,6 +29,7 @@ FetchContent_Declare(
     SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../markovkit"
 )
 FetchContent_MakeAvailable(numerics markovkit)
+find_package(OpenMP)
 
 enable_testing()
 add_subdirectory(tests)

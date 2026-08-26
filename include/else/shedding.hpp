@@ -1,177 +1,172 @@
 #pragma once
 
 #include "else/linalg.hpp"
-#include "else/subnetwork.hpp"
 #include "else/types.hpp"
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 #include <span>
+#include <stdexcept>
+#include <unordered_set>
 #include <vector>
 
 namespace else_sim {
 
-/// @brief Method 3: Flow-balanced expected visits loss approximation (O(n) speed).
-template <typename Float = double, typename Index = std::size_t, typename State = std::vector<int>>
+template <typename Float, typename Index, typename State>
+class Subnetwork;
+
+/// @brief Method 1: Expected Visits / Residence Time Shedding
+template <typename Float = double, typename Index = std::size_t, typename State = std::vector<int>, typename Vec>
 inline std::vector<Float>
 compute_expected_visits_losses(const Subnetwork<Float, Index, State> &subnetwork,
-                               const std::vector<Float> &occupation) {
-    const Index n = subnetwork.size();
-    const auto &column_sums = subnetwork.inverse_column_sums();
-    const auto &R = subnetwork.generator();
-
-    std::vector<Float> losses(n, static_cast<Float>(0));
-    for (Index i = 0; i < n; ++i) {
-        const Float rate = -R(i, i);
-        const Float w_i = (i < column_sums.size()) ? column_sums[i] : static_cast<Float>(1);
-        losses[i] = std::max(static_cast<Float>(0), occupation[i] * rate * w_i);
+                               const Vec &occupancy,
+                               std::span<const Index> candidate_indices) {
+    std::vector<Float> losses;
+    losses.reserve(candidate_indices.size());
+    for (Index idx : candidate_indices) {
+        if (idx >= subnetwork.size()) {
+            throw std::out_of_range("candidate state index out of range");
+        }
+        const Float tau_i = static_cast<Float>(occupancy[idx]);
+        const Float q_ii = -subnetwork.generator()(idx, idx);
+        const Float loss = (q_ii > static_cast<Float>(0)) ? (tau_i * q_ii) : tau_i;
+        losses.push_back(loss);
     }
     return losses;
 }
 
-/// @brief Method 2: Steady-State Normalized Symmetrized Surrogate Operator.
-/// \widetilde{S} = 0.5 * (H (-R) H^-1 + H^-1 (-R)^T H) with H = diag(sqrt(pi)).
-template <typename Float = double, typename Index = std::size_t, typename State = std::vector<int>>
+/// @brief Method 2: Symmetrized Dirichlet Form Upper-Bound Shedding
+template <typename Float = double, typename Index = std::size_t, typename State = std::vector<int>, typename Vec>
 inline std::vector<Float>
 compute_symmetrized_losses(const Subnetwork<Float, Index, State> &subnetwork,
-                           const std::vector<Float> &occupation) {
-    const Index n = subnetwork.size();
-    const auto &column_sums = subnetwork.inverse_column_sums();
-    const auto &R = subnetwork.generator();
-    const auto weights = subnetwork.stationary_weights();
-
-    Matrix<Float> S(n, n, static_cast<Float>(0));
-    for (Index i = 0; i < n; ++i) {
-        const Float h_i = (!weights.empty() && i < weights.size()) ? weights[i] : static_cast<Float>(1);
-        for (Index j = 0; j < n; ++j) {
-            const Float h_j = (!weights.empty() && j < weights.size()) ? weights[j] : static_cast<Float>(1);
-            const Float r_ij = (h_i / std::max(static_cast<Float>(1e-12), h_j)) * (-R(i, j));
-            const Float r_ji = (h_j / std::max(static_cast<Float>(1e-12), h_i)) * (-R(j, i));
-            S(i, j) = static_cast<Float>(0.5) * (r_ij + r_ji);
-        }
+                           const Vec &occupancy,
+                           std::span<const Index> candidate_indices) {
+    if (!subnetwork.is_reversible()) {
+        throw std::invalid_argument("Symmetrized shedding requires a reversible Markov chain");
     }
-    for (Index i = 0; i < n; ++i) {
-        Float row_sum = static_cast<Float>(0);
-        for (Index j = 0; j < n; ++j) {
-            if (i != j) {
-                row_sum += std::abs(S(i, j));
+    const auto weights = subnetwork.stationary_weights();
+    std::vector<Float> losses;
+    losses.reserve(candidate_indices.size());
+
+    const auto &R = subnetwork.generator();
+    for (Index idx : candidate_indices) {
+        if (idx >= subnetwork.size()) {
+            throw std::out_of_range("candidate state index out of range");
+        }
+        const Float u_i = static_cast<Float>(occupancy[idx]);
+        const Float h_i = weights[idx];
+        const Float phi_i = (h_i > static_cast<Float>(0)) ? (u_i / h_i) : static_cast<Float>(0);
+
+        Float s_ii = -R(idx, idx);
+        Float dirichlet_sum = s_ii * (phi_i * phi_i);
+
+        const auto row_start = R.row_ptr[idx];
+        const auto row_stop = R.row_ptr[idx + 1];
+        for (auto k = row_start; k < row_stop; ++k) {
+            const Index j = R.col_idx[k];
+            if (j != idx && j < subnetwork.size()) {
+                const Float u_j = static_cast<Float>(occupancy[j]);
+                const Float h_j = weights[j];
+                const Float phi_j = (h_j > static_cast<Float>(0)) ? (u_j / h_j) : static_cast<Float>(0);
+                const Float s_ij = -R.values[k] * (h_j / h_i);
+                const Float diff = phi_i - phi_j;
+                dirichlet_sum += s_ij * (diff * diff);
             }
         }
-        S(i, i) = std::max(S(i, i), row_sum + static_cast<Float>(1e-6));
-    }
-
-    auto chol = factorize_cholesky(std::move(S));
-    if (!chol.success) {
-        return compute_expected_visits_losses(subnetwork, occupation);
-    }
-
-    std::vector<Float> losses(n, static_cast<Float>(0));
-    std::vector<Float> e(n, static_cast<Float>(0));
-    std::vector<Float> z(n, static_cast<Float>(0));
-    for (Index i = 0; i < n; ++i) {
-        e[i] = static_cast<Float>(1);
-        cholesky_solve(chol, e, z);
-        e[i] = static_cast<Float>(0);
-        const Float diag = std::max(z[i], static_cast<Float>(1e-12));
-        const Float w_i = (i < column_sums.size()) ? column_sums[i] : static_cast<Float>(1);
-        losses[i] = std::max(static_cast<Float>(0), occupation[i] * (w_i / diag));
+        losses.push_back(std::max(static_cast<Float>(0), dirichlet_sum));
     }
     return losses;
 }
 
-/// @brief Evaluates shedding losses across all candidates under the selected algorithmic method.
-template <typename Float = double, typename Index = std::size_t, typename State = std::vector<int>>
+/// @brief Method 3: Woodbury Resolvent Inverse Update
+template <typename Float = double, typename Index = std::size_t, typename State = std::vector<int>, typename Vec>
+inline std::vector<Float>
+compute_woodbury_losses(const Subnetwork<Float, Index, State> &subnetwork,
+                        const Vec &occupancy,
+                        std::span<const Index> candidate_indices) {
+    return subnetwork.cut_time_losses(occupancy, candidate_indices);
+}
+
+/// @brief Unified shedding loss dispatcher across Methods 1, 2, and 3.
+template <typename Float = double, typename Index = std::size_t, typename State = std::vector<int>, typename Vec>
 inline std::vector<Float>
 compute_shedding_losses(const Subnetwork<Float, Index, State> &subnetwork,
-                        const std::vector<Float> &occupation,
-                        const SheddingOptions<Index, Float> &options = {},
-                        SheddingDiagnostics<Index, Float> *diagnostics = nullptr) {
-    const Index n = subnetwork.size();
-    if (occupation.size() != n) {
-        throw std::invalid_argument("occupation size must match subnetwork size");
+                        const Vec &occupancy,
+                        std::span<const Index> candidate_indices,
+                        SheddingMethod method = SheddingMethod::CholeskyWoodbury) {
+    switch (method) {
+        case SheddingMethod::ExpectedVisits:
+            return compute_expected_visits_losses<Float, Index, State>(subnetwork, occupancy, candidate_indices);
+        case SheddingMethod::NormalizedSymmetrized:
+            return compute_symmetrized_losses<Float, Index, State>(subnetwork, occupancy, candidate_indices);
+        case SheddingMethod::CholeskyWoodbury:
+        case SheddingMethod::Auto:
+            return compute_woodbury_losses<Float, Index, State>(subnetwork, occupancy, candidate_indices);
+        default:
+            throw std::invalid_argument("unknown SheddingMethod specified");
     }
-
-    SheddingMethod effective_method = options.method;
-    if (effective_method == SheddingMethod::Auto) {
-        effective_method = subnetwork.is_reversible() ? SheddingMethod::CholeskyWoodbury
-                                                      : SheddingMethod::ExpectedVisits;
-    }
-
-    std::vector<Float> losses;
-    switch (effective_method) {
-    case SheddingMethod::CholeskyWoodbury:
-        losses = subnetwork.cut_time_losses(occupation);
-        break;
-    case SheddingMethod::NormalizedSymmetrized:
-        losses = compute_symmetrized_losses(subnetwork, occupation);
-        break;
-    case SheddingMethod::ExpectedVisits:
-        losses = compute_expected_visits_losses(subnetwork, occupation);
-        break;
-    case SheddingMethod::Auto:
-        break;
-    }
-
-    if (diagnostics) {
-        diagnostics->requested_method = options.method;
-        diagnostics->effective_method = effective_method;
-        diagnostics->initial_states = n;
-    }
-    return losses;
 }
 
-/// @brief Performs state space shedding under capacity constraints with protected states.
-template <typename Float = double, typename Index = std::size_t, typename State = std::vector<int>>
+/// @brief Shed states based on SheddingOptions and protected state indices.
+template <typename Float = double, typename Index = std::size_t, typename State = std::vector<int>, typename Vec>
 inline SheddingResult<Index, Float>
 shed_states(const Subnetwork<Float, Index, State> &subnetwork,
-            const std::vector<Float> &occupation,
-            const std::vector<Index> &protected_states = {},
+            const Vec &occupancy,
+            std::span<const Index> protected_indices,
             const SheddingOptions<Index, Float> &options = {}) {
     const Index n = subnetwork.size();
-    SheddingDiagnostics<Index, Float> diag;
-    const auto losses = compute_shedding_losses(subnetwork, occupation, options, &diag);
+    std::unordered_set<Index> prot_set(protected_indices.begin(), protected_indices.end());
 
-    std::vector<bool> is_protected(n, false);
-    for (Index p : protected_states) {
-        if (p < n) is_protected[p] = true;
-    }
-
-    std::vector<std::pair<Float, Index>> ranking;
+    std::vector<Index> candidates;
     for (Index i = 0; i < n; ++i) {
-        if (!is_protected[i]) {
-            ranking.emplace_back(losses[i], i);
-        }
+        if (!prot_set.count(i)) candidates.push_back(i);
     }
-    std::sort(ranking.begin(), ranking.end());
+
+    std::vector<Index> all_indices(n);
+    std::iota(all_indices.begin(), all_indices.end(), static_cast<Index>(0));
+    const auto losses = compute_shedding_losses(subnetwork, occupancy, std::span<const Index>(all_indices), options.method);
 
     Index target = options.target_capacity > 0 ? options.target_capacity : n;
-    Index remove_count = (n > target) ? (n - target) : 0;
-    remove_count = std::min(remove_count, static_cast<Index>(ranking.size()));
+    if (target < protected_indices.size()) target = protected_indices.size();
 
-    std::vector<bool> is_shed(n, false);
-    std::vector<Index> shed_indices;
-    shed_indices.reserve(remove_count);
-    for (Index i = 0; i < remove_count; ++i) {
-        const Index idx = ranking[i].second;
-        is_shed[idx] = true;
-        shed_indices.push_back(idx);
+    const Index needed_removals = (n > target) ? (n - target) : 0;
+
+    std::vector<std::pair<Float, Index>> ranked_candidates;
+    for (Index c : candidates) {
+        ranked_candidates.push_back({losses[c], c});
+    }
+    std::sort(ranked_candidates.begin(), ranked_candidates.end());
+
+    std::unordered_set<Index> to_remove;
+    for (Index i = 0; i < needed_removals && i < ranked_candidates.size(); ++i) {
+        to_remove.insert(ranked_candidates[i].second);
     }
 
-    std::vector<Index> kept_indices;
-    kept_indices.reserve(n - remove_count);
+    SheddingResult<Index, Float> result;
+    result.state_losses = losses;
     for (Index i = 0; i < n; ++i) {
-        if (!is_shed[i]) {
-            kept_indices.push_back(i);
+        if (to_remove.count(i)) {
+            result.shed_indices.push_back(i);
+        } else {
+            result.kept_indices.push_back(i);
         }
     }
+    result.diagnostics.initial_states = n;
+    result.diagnostics.shed_states = result.shed_indices.size();
+    result.diagnostics.remaining_states = result.kept_indices.size();
+    return result;
+}
 
-    diag.shed_states = shed_indices.size();
-    diag.remaining_states = kept_indices.size();
-    return {
-        .kept_indices = std::move(kept_indices),
-        .shed_indices = std::move(shed_indices),
-        .state_losses = losses,
-        .diagnostics = diag,
-    };
+template <typename Float = double, typename Index = std::size_t, typename State = std::vector<int>, typename Vec, typename ProtIndex = Index>
+inline SheddingResult<Index, Float>
+shed_states(const Subnetwork<Float, Index, State> &subnetwork,
+            const Vec &occupancy,
+            std::initializer_list<ProtIndex> protected_indices,
+            const SheddingOptions<Index, Float> &options = {}) {
+    std::vector<Index> converted;
+    converted.reserve(protected_indices.size());
+    for (auto p : protected_indices) converted.push_back(static_cast<Index>(p));
+    return shed_states(subnetwork, occupancy, std::span<const Index>(converted.data(), converted.size()), options);
 }
 
 } // namespace else_sim

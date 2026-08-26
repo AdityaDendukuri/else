@@ -154,11 +154,13 @@ inline LUFactor<Float, Index> factorize_lu(Matrix<Float> A, bool pivot = false) 
         }
 
         const Float inv_piv = static_cast<Float>(1) / M(k, k);
+        const Float *row_k = M.data() + k * n;
         for (Index i = k + 1; i < n; ++i) {
-            M(i, k) *= inv_piv;
-            const Float m_ik = M(i, k);
+            Float *row_i = M.data() + i * n;
+            row_i[k] *= inv_piv;
+            const Float m_ik = row_i[k];
             for (Index j = k + 1; j < n; ++j) {
-                M(i, j) -= m_ik * M(k, j);
+                row_i[j] -= m_ik * row_k[j];
             }
         }
     }
@@ -175,16 +177,22 @@ inline void lu_solve(const LUFactor<Float, Index> &f, const std::vector<Float> &
             if (f.piv[k] != k) std::swap(x[k], x[f.piv[k]]);
         }
     }
+    const Float *data = f.LU.data();
     for (Index i = 0; i < n; ++i) {
+        const Float *row_i = data + i * n;
+        Float sum = static_cast<Float>(0);
         for (Index j = 0; j < i; ++j) {
-            x[i] -= f.LU(i, j) * x[j];
+            sum += row_i[j] * x[j];
         }
+        x[i] -= sum;
     }
     for (Index i = n; i-- > 0;) {
+        const Float *row_i = data + i * n;
+        Float sum = static_cast<Float>(0);
         for (Index j = i + 1; j < n; ++j) {
-            x[i] -= f.LU(i, j) * x[j];
+            sum += row_i[j] * x[j];
         }
-        x[i] /= f.LU(i, i);
+        x[i] = (x[i] - sum) / row_i[i];
     }
 }
 
@@ -220,34 +228,30 @@ struct CholeskyFactor {
 
 /// @brief Compute LL^T Cholesky factorization.
 template <typename Float = double, typename Index = std::size_t>
-inline CholeskyFactor<Float> factorize_cholesky(Matrix<Float> A) {
+inline CholeskyFactor<Float> factorize_cholesky(const Matrix<Float> &A) {
     const Index n = A.rows();
     CholeskyFactor<Float> result;
-    result.L = std::move(A);
+    result.L = Matrix<Float>(n, n, static_cast<Float>(0));
     auto &L = result.L;
 
-    for (Index j = 0; j < n; ++j) {
-        Float sum = static_cast<Float>(0);
-        for (Index k = 0; k < j; ++k) sum += L(j, k) * L(j, k);
-        Float diag = L(j, j) - sum;
-        if (diag <= static_cast<Float>(0)) {
-            result.success = false;
-            return result;
-        }
-        L(j, j) = std::sqrt(diag);
-        const Float inv_diag = static_cast<Float>(1) / L(j, j);
-
-        for (Index i = j + 1; i < n; ++i) {
-            Float s = static_cast<Float>(0);
-            for (Index k = 0; k < j; ++k) s += L(i, k) * L(j, k);
-            L(i, j) = (L(i, j) - s) * inv_diag;
-        }
-    }
     for (Index i = 0; i < n; ++i) {
-        for (Index j = i + 1; j < n; ++j) {
-            L(i, j) = static_cast<Float>(0);
+        for (Index j = 0; j <= i; ++j) {
+            Float sum = A(i, j);
+            for (Index k = 0; k < j; ++k) {
+                sum -= L(i, k) * L(j, k);
+            }
+            if (i == j) {
+                if (sum <= static_cast<Float>(0)) {
+                    result.success = false;
+                    return result;
+                }
+                L(i, j) = std::sqrt(sum);
+            } else {
+                L(i, j) = sum / L(j, j);
+            }
         }
     }
+    result.success = true;
     return result;
 }
 

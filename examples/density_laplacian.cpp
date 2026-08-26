@@ -42,6 +42,7 @@ int main() {
     std::array<std::array<std::vector<double>, count>, count> curves;
 
     // 2. Propagate local density using the Laplace solver with Talbot contour quadrature nodes
+    #pragma omp parallel for schedule(dynamic)
     for (std::size_t panel = 0; panel < count; ++panel) {
         // Build localized subnetwork around starting state
         auto subnetworks = else_sim::laplacian_restrictions(laplacian, h, starts[panel], 500, 2);
@@ -50,20 +51,9 @@ int main() {
         else_sim::LaplaceDensitySolver density(std::move(subnetworks));
 
         for (double time : times) {
-            // Optional zero-overhead observer inspecting contour nodes & shifts
-            auto observer = [](const else_sim::ContourNodeStatus &status) {
-                if (status.node_index == 0) {
-                    double log_t = std::log10(status.time);
-                    if (std::abs(log_t - std::round(log_t)) < 1e-3) {
-                        std::cout << "  [Talbot Contour] Reached time decade 10^("
-                                  << static_cast<int>(std::round(log_t)) << ")\n";
-                    }
-                }
-            };
-
             // Solve transient density p(t) by integrating resolvents over 14 Talbot contour nodes
             const auto solution = density.solve(markovkit::State{static_cast<int>(starts[panel])},
-                                                time, /*nodes=*/14, observer);
+                                                time, /*nodes=*/14);
 
             // Project density onto each committor: <C_j>(t) = \sum_i C_ij * p_i(t)
             for (std::size_t obs = 0; obs < count; ++obs) {

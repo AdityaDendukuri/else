@@ -47,12 +47,12 @@ int main() {
     const auto many_else = else_sim::else_ensemble(
         model, rates, initial, 20, 0.0, final_time,
         {.capacity = subnetwork_capacity, .maximum_steps = simulation_steps}, 42);
-    std::vector<markovkit::Trajectory> many_ssa;
-    many_ssa.reserve(20);
-    // Use matching seed ranges for the SSA ensemble.
-    for (int seed = 42; seed < 62; ++seed) {
-        many_ssa.push_back(
-            ssa::gillespie(model, rates, initial, 0.0, final_time, seed, simulation_steps));
+    std::vector<markovkit::Trajectory> many_ssa(20);
+    // Use matching seed ranges for the SSA ensemble with OpenMP parallelism.
+    #pragma omp parallel for schedule(dynamic)
+    for (int i = 0; i < 20; ++i) {
+        const int seed = 42 + i;
+        many_ssa[i] = ssa::gillespie(model, rates, initial, 0.0, final_time, seed, simulation_steps);
     }
 
     // Plot single paths above their ensemble counterparts.
