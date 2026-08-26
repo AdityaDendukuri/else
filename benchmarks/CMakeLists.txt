@@ -1,0 +1,2 @@
+add_executable(benchmark_else benchmark_else.cpp)
+target_link_libraries(benchmark_else PRIVATE else)
