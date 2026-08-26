@@ -19,6 +19,18 @@ target_include_directories(else
     $<INSTALL_INTERFACE:include>
 )
 
+include(FetchContent)
+FetchContent_Declare(
+    numerics
+    SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../numerics"
+)
+FetchContent_Declare(
+    markovkit
+    SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../markovkit"
+)
+FetchContent_MakeAvailable(numerics markovkit)
+
 enable_testing()
 add_subdirectory(tests)
 add_subdirectory(benchmarks)
+add_subdirectory(examples)

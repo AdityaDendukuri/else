@@ -15,15 +15,30 @@
 namespace else_sim {
 
 template <typename Float = double>
-struct ContourNodeStatus {
+struct ContourNodeStatusTemplate {
     Float time = static_cast<Float>(0);
     std::size_t node_index = 0;
     std::size_t total_nodes = 0;
     std::complex<Float> shift{0, 0};
 };
 
+using ContourNodeStatus = ContourNodeStatusTemplate<double>;
+
 template <typename Float = double>
-using ContourObserver = std::function<void(const ContourNodeStatus<Float> &)>;
+using ContourObserver = std::function<void(const ContourNodeStatusTemplate<Float> &)>;
+
+template <typename State, typename Arg>
+inline State to_state(const Arg &arg) {
+    if constexpr (std::is_same_v<std::decay_t<Arg>, State>) {
+        return arg;
+    } else {
+        State s;
+        for (std::size_t i = 0; i < arg.size(); ++i) {
+            s.push_back(static_cast<int>(arg[i]));
+        }
+        return s;
+    }
+}
 
 /// @brief Invert the Laplace-domain density propagated through an ELSE subnetwork chain
 /// via shifted resolvent linear solves on a modified Talbot contour.
@@ -55,6 +70,18 @@ class LaplaceDensitySolver {
         return solve(init_map, time, nodes, observer);
     }
 
+    template <typename StateArg>
+    requires (!std::is_same_v<std::decay_t<StateArg>, State> &&
+              !std::is_same_v<std::decay_t<StateArg>, std::map<State, Float>>)
+    [[nodiscard]] DensitySolution<State, Float> solve(const StateArg &initial, Float time,
+                                                      Index nodes = 14,
+                                                      ContourObserver<Float> observer = nullptr) {
+        State converted = to_state<State>(initial);
+        std::map<State, Float> init_map;
+        init_map[std::move(converted)] = static_cast<Float>(1.0);
+        return solve(init_map, time, nodes, observer);
+    }
+
     [[nodiscard]] DensitySolution<State, Float> solve(const std::map<State, Float> &initial,
                                                       Float time, Index nodes = 14,
                                                       ContourObserver<Float> observer = nullptr) {
@@ -67,7 +94,7 @@ class LaplaceDensitySolver {
         for (std::size_t k = 0; k < contour.size(); ++k) {
             const auto &node = contour[k];
             if (observer) {
-                observer(ContourNodeStatus<Float>{
+                observer(ContourNodeStatusTemplate<Float>{
                     .time = time,
                     .node_index = k,
                     .total_nodes = contour.size(),

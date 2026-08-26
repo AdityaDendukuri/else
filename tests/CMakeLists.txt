@@ -1,3 +1,3 @@
-add_executable(test_else test_else.cpp)
-target_link_libraries(test_else PRIVATE else)
-add_test(NAME test_else COMMAND test_else)
+add_executable(test_else_templates test_else.cpp)
+target_link_libraries(test_else_templates PRIVATE else)
+add_test(NAME test_else_templates COMMAND test_else_templates)
