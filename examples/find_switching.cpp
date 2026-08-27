@@ -51,7 +51,9 @@ void test_params(double scale, const std::string &name) {
 
     // Test ELSE
     else_sim::ELSEOptions opt{.capacity = 300, .expansion_depth = 1, .tolerance = 1e-12, .maximum_steps = 100000};
-    auto ens = else_sim::else_ensemble(model, rates, initial_state, 20, 0.0, final_time, opt, 42);
+    auto ens = else_sim::else_ensemble(
+        model, rates, initial_state, 20, 0.0, final_time, opt, 42,
+        [](const markovkit::State &x) { return x[0]; });
     int else_switches = 0;
     for (const auto &traj : ens) {
         int max_u = 0, max_v = 0;

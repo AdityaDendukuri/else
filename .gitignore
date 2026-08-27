@@ -4,3 +4,4 @@ build/
 *.png
 *.csv
 compile_commands.json
+laplacians/

@@ -13,9 +13,13 @@
 ///   3. Resolvent Solvers     : num::AutoResolventSolver solving shifted systems (z_k*I - Q) x = b
 
 #include "else/density.hpp"
+#include "else/laplacian.hpp"
 #include "io/json.hpp"
 #include "io/sparse_json.hpp"
-#include "markovkit.hpp"
+#include "container/util/math.hpp"
+#include "plot/plot.hpp"
+#include "stats/probability.hpp"
+#include "stats/selection.hpp"
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -52,8 +56,8 @@ int main() {
 
         for (double time : times) {
             // Solve transient density p(t) by integrating resolvents over 14 Talbot contour nodes
-            const auto solution = density.solve(markovkit::State{static_cast<int>(starts[panel])},
-                                                time, /*nodes=*/14);
+            const auto solution = density.solve(
+                std::vector<int>{static_cast<int>(starts[panel])}, time, /*nodes=*/14);
 
             // Project density onto each committor: <C_j>(t) = \sum_i C_ij * p_i(t)
             for (std::size_t obs = 0; obs < count; ++obs) {

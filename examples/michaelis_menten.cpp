@@ -32,9 +32,10 @@ int main() {
 
     // Solve the same terminal density through ELSE subnetworks.
     auto subnetworks = else_sim::density_subnetworks(model, rates, initial, 30,
-                                                     {.capacity = 60, .expansion_depth = 0});
+                                                     {.capacity = 60, .expansion_depth = 0},
+                                                     [](const markovkit::State &x) { return x[0]; });
     const auto else_solution =
-        else_sim::TalbotDensitySolver(std::move(subnetworks)).solve(initial, time);
+        else_sim::LaplaceDensitySolver(std::move(subnetworks)).solve(initial, time);
 
     std::array<std::map<int, double>, 4> fsp_marginals;
     std::array<std::map<int, double>, 4> else_marginals;

@@ -91,77 +91,34 @@ struct SparseMatrix {
     }
 };
 
-/// @brief Dense matrix-vector product y = A * x.
-template <typename Float = double>
-inline void matvec(const Matrix<Float> &A, const std::vector<Float> &x, std::vector<Float> &y) {
-    const auto m = A.rows();
-    const auto n = A.cols();
-    y.assign(m, static_cast<Float>(0));
-    for (std::size_t i = 0; i < m; ++i) {
-        Float sum = static_cast<Float>(0);
-        for (std::size_t j = 0; j < n; ++j) {
-            sum += A(i, j) * x[j];
-        }
-        y[i] = sum;
-    }
-}
-
-/// @brief Packed LU factorization result supporting optional unpivoted mode.
+/// @brief Packed no-pivot dense LU factorization result.
 template <typename Float = double, typename Index = std::size_t>
 struct LUFactor {
     Matrix<Float> LU;
-    std::vector<Index> piv;
-    bool pivoted = false;
     bool singular = false;
 };
 
-/// @brief Compute LU factorization with optional pivoting (default: unpivoted for M-matrices).
+/// @brief Compute a no-pivot dense LU factorization.
 template <typename Float = double, typename Index = std::size_t>
-inline LUFactor<Float, Index> factorize_lu(Matrix<Float> A, bool pivot = false) {
+inline LUFactor<Float, Index> factorize_lu(Matrix<Float> A) {
     using Real = decltype(std::abs(std::declval<Float>()));
     const Index n = A.rows();
     LUFactor<Float, Index> result;
     result.LU = std::move(A);
-    result.pivoted = pivot;
-    result.singular = false;
-    if (pivot) result.piv.resize(n);
-
     auto &M = result.LU;
     constexpr Real tol = static_cast<Real>(1e-15);
-
     for (Index k = 0; k < n; ++k) {
-        if (pivot) {
-            Index max_row = k;
-            Real max_val = std::abs(M(k, k));
-            for (Index i = k + 1; i < n; ++i) {
-                Real v = std::abs(M(i, k));
-                if (v > max_val) {
-                    max_val = v;
-                    max_row = i;
-                }
-            }
-            result.piv[k] = max_row;
-            if (max_row != k) {
-                for (Index j = 0; j < n; ++j) {
-                    std::swap(M(k, j), M(max_row, j));
-                }
-            }
-        }
-
         if (std::abs(M(k, k)) < tol) {
             result.singular = true;
             continue;
         }
-
         const Float inv_piv = static_cast<Float>(1) / M(k, k);
         const Float *row_k = M.data() + k * n;
         for (Index i = k + 1; i < n; ++i) {
             Float *row_i = M.data() + i * n;
             row_i[k] *= inv_piv;
             const Float m_ik = row_i[k];
-            for (Index j = k + 1; j < n; ++j) {
-                row_i[j] -= m_ik * row_k[j];
-            }
+            for (Index j = k + 1; j < n; ++j) row_i[j] -= m_ik * row_k[j];
         }
     }
     return result;
@@ -169,54 +126,56 @@ inline LUFactor<Float, Index> factorize_lu(Matrix<Float> A, bool pivot = false) 
 
 /// @brief Solve A x = b from a precomputed LU factorization.
 template <typename Float = double, typename Index = std::size_t>
-inline void lu_solve(const LUFactor<Float, Index> &f, const std::vector<Float> &b, std::vector<Float> &x) {
+inline void lu_solve(const LUFactor<Float, Index> &f, const std::vector<Float> &b,
+                     std::vector<Float> &x) {
     const Index n = f.LU.rows();
     x = b;
-    if (f.pivoted) {
-        for (Index k = 0; k < n; ++k) {
-            if (f.piv[k] != k) std::swap(x[k], x[f.piv[k]]);
-        }
-    }
     const Float *data = f.LU.data();
     for (Index i = 0; i < n; ++i) {
         const Float *row_i = data + i * n;
-        Float sum = static_cast<Float>(0);
-        for (Index j = 0; j < i; ++j) {
-            sum += row_i[j] * x[j];
-        }
-        x[i] -= sum;
+        for (Index j = 0; j < i; ++j) x[i] -= row_i[j] * x[j];
     }
     for (Index i = n; i-- > 0;) {
         const Float *row_i = data + i * n;
-        Float sum = static_cast<Float>(0);
-        for (Index j = i + 1; j < n; ++j) {
-            sum += row_i[j] * x[j];
+        for (Index j = i + 1; j < n; ++j) x[i] -= row_i[j] * x[j];
+        x[i] /= row_i[i];
+    }
+}
+
+template <typename Float = double, typename Index = std::size_t>
+inline void lu_solve(const LUFactor<Float, Index> &f, const Matrix<Float> &B,
+                     Matrix<Float> &X) {
+    const Index n = static_cast<Index>(f.LU.rows());
+    const Index nrhs = static_cast<Index>(B.cols());
+    if (B.rows() != n) throw std::invalid_argument("LU block right-hand side size mismatch");
+    X = B;
+    for (Index i = 0; i < n; ++i)
+        for (Index j = 0; j < i; ++j) {
+            const Float value = f.LU(i, j);
+            for (Index c = 0; c < nrhs; ++c) X(i, c) -= value * X(j, c);
         }
-        x[i] = (x[i] - sum) / row_i[i];
+    for (Index i = n; i-- > 0;) {
+        for (Index j = i + 1; j < n; ++j) {
+            const Float value = f.LU(i, j);
+            for (Index c = 0; c < nrhs; ++c) X(i, c) -= value * X(j, c);
+        }
+        for (Index c = 0; c < nrhs; ++c) X(i, c) /= f.LU(i, i);
     }
 }
 
 /// @brief Solve A^T x = b from a precomputed LU factorization.
 template <typename Float = double, typename Index = std::size_t>
-inline void lu_solve_transpose(const LUFactor<Float, Index> &f, const std::vector<Float> &b, std::vector<Float> &x) {
+inline void lu_solve_transpose(const LUFactor<Float, Index> &f,
+                               const std::vector<Float> &b,
+                               std::vector<Float> &x) {
     const Index n = f.LU.rows();
     x = b;
     for (Index i = 0; i < n; ++i) {
-        for (Index j = 0; j < i; ++j) {
-            x[i] -= f.LU(j, i) * x[j];
-        }
+        for (Index j = 0; j < i; ++j) x[i] -= f.LU(j, i) * x[j];
         x[i] /= f.LU(i, i);
     }
-    for (Index i = n; i-- > 0;) {
-        for (Index j = i + 1; j < n; ++j) {
-            x[i] -= f.LU(j, i) * x[j];
-        }
-    }
-    if (f.pivoted) {
-        for (Index k = n; k-- > 0;) {
-            if (f.piv[k] != k) std::swap(x[k], x[f.piv[k]]);
-        }
-    }
+    for (Index i = n; i-- > 0;)
+        for (Index j = i + 1; j < n; ++j) x[i] -= f.LU(j, i) * x[j];
 }
 
 /// @brief Cholesky factorization result for symmetric positive definite matrices.

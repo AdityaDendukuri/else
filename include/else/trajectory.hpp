@@ -1,12 +1,11 @@
 #pragma once
 
-#include "else/subnetwork.hpp"
+#include "else/restriction.hpp"
+#include "else/shedding.hpp"
 #include "else/types.hpp"
 #include <algorithm>
-#include <map>
 #include <numeric>
 #include <random>
-#include <set>
 #include <span>
 #include <stdexcept>
 #include <unordered_map>
@@ -15,10 +14,9 @@
 
 namespace else_sim {
 
-template <typename State = std::vector<int>, typename Float = double>
+template <typename State = std::vector<int>>
 struct StateSpace {
     std::vector<State> states;
-    std::vector<Float> probs;
     std::unordered_map<State, int, StateHash<State>> index;
 
     [[nodiscard]] int size() const { return static_cast<int>(states.size()); }
@@ -29,29 +27,26 @@ struct StateSpace {
         return it != index.end() ? it->second : -1;
     }
 
-    void add_state(const State &x, Float prob = static_cast<Float>(0)) {
-        if (index.count(x)) return;
+    void add_state(const State &x) {
+        if (index.count(x))
+            return;
         int i = static_cast<int>(states.size());
         states.push_back(x);
-        probs.push_back(prob);
         index[x] = i;
     }
 
     void remove_states(const std::vector<bool> &remove_mask) {
-        if (std::none_of(remove_mask.begin(), remove_mask.end(), [](bool b) { return b; })) return;
+        if (std::none_of(remove_mask.begin(), remove_mask.end(), [](bool b) { return b; }))
+            return;
         int n = static_cast<int>(states.size());
         std::vector<State> new_states;
-        std::vector<Float> new_probs;
         new_states.reserve(n);
-        new_probs.reserve(n);
         for (int i = 0; i < n; ++i) {
             if (!remove_mask[i]) {
                 new_states.push_back(states[i]);
-                new_probs.push_back(probs[i]);
             }
         }
         states = std::move(new_states);
-        probs = std::move(new_probs);
         index.clear();
         for (int i = 0; i < static_cast<int>(states.size()); ++i) {
             index[states[i]] = i;
@@ -78,7 +73,8 @@ boundary_choices(const Subnetwork<Float, Index, State> &subnetwork) {
 }
 
 template <typename State = std::vector<int>, typename Float = double>
-inline void finish_trajectory(Trajectory<State, Float> &trajectory, Float &current_time, Float final_time) {
+inline void finish_trajectory(Trajectory<State, Float> &trajectory, Float &current_time,
+                              Float final_time) {
     current_time = final_time;
     if (trajectory.times.empty() || trajectory.times.back() < final_time) {
         trajectory.times.push_back(final_time);
@@ -86,13 +82,12 @@ inline void finish_trajectory(Trajectory<State, Float> &trajectory, Float &curre
     }
 }
 
-template <typename ReactionSystem, typename State = std::vector<int>, typename Float = double, typename Index = std::size_t>
+template <typename ReactionSystem, typename State = std::vector<int>, typename Float = double,
+          typename Index = std::size_t, typename LevelFunction = SingleBlockLevel>
 inline std::vector<Trajectory<State, Float>>
-else_ensemble(const ReactionSystem &model,
-              const std::vector<Float> &rates,
-              const State &initial, std::size_t count,
-              Float initial_time, Float final_time,
-              ELSEOptions<Index, Float> options = {}, int seed = 42) {
+else_ensemble(const ReactionSystem &model, const std::vector<Float> &rates, const State &initial,
+              std::size_t count, Float initial_time, Float final_time,
+              ELSEOptions<Index, Float> options = {}, int seed = 42, LevelFunction level = {}) {
     if (count == 0 || initial_time > final_time) {
         throw std::invalid_argument("invalid ELSE trajectory ensemble request");
     }
@@ -109,7 +104,9 @@ else_ensemble(const ReactionSystem &model,
         generators.emplace_back(seed + static_cast<int>(t));
     }
 
-    StateSpace<State, Float> workspace;
+    StateSpace<State> workspace;
+    // The current solve supplies the shedding scores used before the next factorization.
+    std::unordered_map<State, Float, StateHash<State>> previous_scores;
     while (true) {
         std::vector<std::size_t> unfinished;
         std::unordered_map<State, Float, StateHash<State>> entrances;
@@ -119,7 +116,8 @@ else_ensemble(const ReactionSystem &model,
                 entrances[states[t]] += static_cast<Float>(1);
             }
         }
-        if (unfinished.empty()) break;
+        if (unfinished.empty())
+            break;
 
         for (auto &[s, w] : entrances) {
             w /= static_cast<Float>(unfinished.size());
@@ -128,7 +126,7 @@ else_ensemble(const ReactionSystem &model,
         std::vector<State> frontier;
         std::unordered_set<State, StateHash<State>> visited;
         for (const auto &[s, w] : entrances) {
-            workspace.add_state(s, w);
+            workspace.add_state(s);
             frontier.push_back(s);
             visited.insert(s);
         }
@@ -140,78 +138,60 @@ else_ensemble(const ReactionSystem &model,
                     State dest = state + change;
                     bool nonneg = true;
                     for (std::size_t i = 0; i < dest.size(); ++i) {
-                        if (dest[i] < 0) { nonneg = false; break; }
+                        if (dest[i] < 0) {
+                            nonneg = false;
+                            break;
+                        }
                     }
-                    if (!nonneg || !visited.insert(dest).second) continue;
+                    if (!nonneg || !visited.insert(dest).second)
+                        continue;
                     Float total_rate = model.total_propensity(dest, rates, static_cast<Float>(0));
-                    if (total_rate <= options.tolerance) continue;
+                    if (total_rate <= options.tolerance)
+                        continue;
                     workspace.add_state(dest);
                     next.push_back(dest);
                 }
             }
             frontier = std::move(next);
         }
-
         auto build_subnetwork = [&]() {
-            const Index n_ws = workspace.size();
-            std::vector<Index> r_rows, r_cols;
-            std::vector<Float> r_vals;
-            std::vector<BoundaryTransition<Index, State, Float>> boundary;
-
-            for (Index j = 0; j < n_ws; ++j) {
-                const auto &x = workspace.states[j];
-                Float col_sum = static_cast<Float>(0);
-                for (std::size_t k = 0; k < model.size(); ++k) {
-                    Float alpha = static_cast<Float>(model.propensities[k](x, rates, static_cast<Float>(0)));
-                    if (alpha <= static_cast<Float>(0)) continue;
-                    State y = x + model.changes[k];
-                    int pos = workspace.find(y);
-                    if (pos >= 0) {
-                        r_rows.push_back(static_cast<Index>(pos));
-                        r_cols.push_back(j);
-                        r_vals.push_back(alpha);
-                    } else {
-                        boundary.push_back({j, y, alpha});
-                    }
-                    col_sum += alpha;
-                }
-                r_rows.push_back(j);
-                r_cols.push_back(j);
-                r_vals.push_back(-col_sum);
-            }
-            auto R = SparseMatrix<Float, Index>::from_triplets(n_ws, n_ws, r_rows, r_cols, r_vals);
-            return Subnetwork<Float, Index, State>(workspace.states, std::move(R), std::move(boundary));
+            return cme_subnetwork<ReactionSystem, std::vector<Float>, State, Float, Index>(
+                model, rates, workspace.states, level);
         };
 
         if (workspace.size() > static_cast<int>(options.capacity)) {
-            auto expanded = build_subnetwork();
-            std::vector<Float> entrance_vec(workspace.size(), static_cast<Float>(0));
+            std::vector<Index> protected_indices;
             for (const auto &[s, w] : entrances) {
                 int pos = workspace.find(s);
-                if (pos >= 0) entrance_vec[static_cast<std::size_t>(pos)] = w;
+                if (pos >= 0)
+                    protected_indices.push_back(static_cast<Index>(pos));
             }
-            const auto occ = expanded.occupation(entrance_vec);
-            std::vector<Float> visits(workspace.size(), static_cast<Float>(0));
-            for (Index i = 0; i < static_cast<Index>(workspace.size()); ++i) {
-                Float incoming = entrance_vec[i];
-                for (Index k = expanded.generator().row_ptr[i]; k < expanded.generator().row_ptr[i + 1]; ++k) {
-                    Index j = expanded.generator().col_idx[k];
-                    if (j != i) incoming += expanded.generator().values[k] * occ[j];
+
+            std::vector<Float> scores(workspace.size(), static_cast<Float>(0));
+            if (options.expansion_depth == 0 && !previous_scores.empty()) {
+                for (Index i = 0; i < static_cast<Index>(workspace.size()); ++i) {
+                    auto found = previous_scores.find(workspace.states[i]);
+                    if (found != previous_scores.end())
+                        scores[i] = found->second;
                 }
-                visits[i] = incoming;
-            }
-            std::vector<std::pair<Float, int>> candidates;
-            for (int i = 0; i < workspace.size(); ++i) {
-                if (!entrances.count(workspace.states[i])) {
-                    candidates.push_back({visits[i], i});
+            } else {
+                auto expanded = build_subnetwork();
+                std::vector<Float> entrance_vec(workspace.size(), static_cast<Float>(0));
+                for (const auto &[s, w] : entrances) {
+                    int pos = workspace.find(s);
+                    if (pos >= 0)
+                        entrance_vec[static_cast<std::size_t>(pos)] = w;
                 }
+                const auto occ = expanded.occupation(entrance_vec);
+                std::vector<Index> indices(workspace.size());
+                std::iota(indices.begin(), indices.end(), static_cast<Index>(0));
+                scores = expected_visit_scores(expanded, occ, std::span<const Index>(indices));
             }
-            std::sort(candidates.begin(), candidates.end());
-            const std::size_t remove_count = static_cast<std::size_t>(workspace.size() - static_cast<int>(options.capacity));
+            const Index remove_count = static_cast<Index>(workspace.size()) - options.capacity;
+            const auto shed = lowest_scores<Float, Index>(scores, protected_indices, remove_count);
             std::vector<bool> remove(workspace.size(), false);
-            for (std::size_t i = 0; i < remove_count && i < candidates.size(); ++i) {
-                remove[candidates[i].second] = true;
-            }
+            for (Index i : shed)
+                remove[i] = true;
             workspace.remove_states(remove);
         }
 
@@ -234,10 +214,30 @@ else_ensemble(const ReactionSystem &model,
         Matrix<Float> rhs(subnetwork.size(), entrance_states.size(), static_cast<Float>(0));
         for (Index c = 0; c < entrance_states.size(); ++c) {
             int pos = subnetwork.find(entrance_states[c]);
-            if (pos >= 0) rhs(static_cast<std::size_t>(pos), c) = static_cast<Float>(1);
+            if (pos >= 0)
+                rhs(static_cast<std::size_t>(pos), c) = static_cast<Float>(1);
         }
 
         const auto integrals = subnetwork.occupation_integrals(rhs);
+
+        std::vector<Float> mixture_occupation(subnetwork.size(), static_cast<Float>(0));
+        for (Index c = 0; c < entrance_states.size(); ++c) {
+            const Float weight = entrances.at(entrance_states[c]);
+            for (Index i = 0; i < subnetwork.size(); ++i)
+                mixture_occupation[i] += integrals.occupation(i, c) * weight;
+        }
+        std::vector<Index> score_indices(subnetwork.size());
+        std::iota(score_indices.begin(), score_indices.end(), static_cast<Index>(0));
+        auto scores = expected_visit_scores(subnetwork, mixture_occupation,
+                                            std::span<const Index>(score_indices));
+        previous_scores.clear();
+        for (Index i = 0; i < subnetwork.size(); ++i) {
+            auto entrance = entrances.find(subnetwork.states()[i]);
+            if (entrance != entrances.end())
+                scores[i] -= entrance->second;
+            previous_scores[subnetwork.states()[i]] = scores[i];
+        }
+
         auto destinations = boundary_choices(subnetwork);
 
         std::vector<std::discrete_distribution<std::size_t>> exit_dists;
@@ -262,7 +262,8 @@ else_ensemble(const ReactionSystem &model,
             }
 
             times[t] += waiting_time;
-            std::discrete_distribution<std::size_t> rate_dist(choice.rates.begin(), choice.rates.end());
+            std::discrete_distribution<std::size_t> rate_dist(choice.rates.begin(),
+                                                              choice.rates.end());
             states[t] = choice.destinations[rate_dist(rng)];
             trajectories[t].times.push_back(times[t]);
             trajectories[t].states.push_back(states[t]);
@@ -272,13 +273,14 @@ else_ensemble(const ReactionSystem &model,
     return trajectories;
 }
 
-template <typename ReactionSystem, typename State = std::vector<int>, typename Float = double, typename Index = std::size_t>
+template <typename ReactionSystem, typename State = std::vector<int>, typename Float = double,
+          typename Index = std::size_t, typename LevelFunction = SingleBlockLevel>
 inline Trajectory<State, Float>
-else_trajectory(const ReactionSystem &model,
-                const std::vector<Float> &rates,
-                const State &initial, Float initial_time,
-                Float final_time, ELSEOptions<Index, Float> options = {}, int seed = 42) {
-    auto ensemble = else_ensemble(model, rates, initial, 1, initial_time, final_time, options, seed);
+else_trajectory(const ReactionSystem &model, const std::vector<Float> &rates, const State &initial,
+                Float initial_time, Float final_time, ELSEOptions<Index, Float> options = {},
+                int seed = 42, LevelFunction level = {}) {
+    auto ensemble = else_ensemble(model, rates, initial, 1, initial_time, final_time, options, seed,
+                                  std::move(level));
     return std::move(ensemble.front());
 }
 

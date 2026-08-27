@@ -32,3 +32,7 @@ cmake ..
 cmake --build .
 ctest --output-on-failure
 ```
+
+The library, tests, and benchmark have no external dependencies. Examples use
+the adjacent Markovkit and Numerics repositories and are enabled with
+`-DELSE_BUILD_EXAMPLES=ON`.

@@ -1,10 +1,7 @@
 #pragma once
 
 #include <cstddef>
-#include <cstdint>
 #include <functional>
-#include <limits>
-#include <string>
 #include <type_traits>
 #include <vector>
 
@@ -26,12 +23,10 @@ struct StateHash {
     }
 };
 
-/// @brief Directed transition between discrete states within a generator.
-template <typename Index = std::size_t, typename Float = double>
-struct Transition {
-    Index source = 0;
-    Index destination = 0;
-    Float rate = static_cast<Float>(0);
+/// Default ordering: no block structure is supplied by the caller.
+struct SingleBlockLevel {
+    template <typename State>
+    [[nodiscard]] constexpr std::size_t operator()(const State &) const noexcept { return 0; }
 };
 
 /// @brief Exit transition from a subnetwork interior state to an external state.
@@ -60,47 +55,6 @@ struct CutTimeLossResult {
     bool naive_fallback_used = false;              ///< True if ground-truth scratch refactor was used
 };
 
-/// @brief Algorithmic strategy for state shedding.
-enum class SheddingMethod : std::uint8_t {
-    CholeskyWoodbury,      ///< Method 1: Exact Cholesky Woodbury principal block downdates
-    NormalizedSymmetrized, ///< Method 2: Steady-state normalized symmetrized surrogate
-    ExpectedVisits,        ///< Method 3: Flow-balanced expected visits O(n) approximation
-    Auto,                  ///< Automatic selection based on reversibility
-};
-
-/// @brief Configuration parameters for state shedding and truncation.
-template <typename Index = std::size_t, typename Float = double>
-struct SheddingOptions {
-    SheddingMethod method = SheddingMethod::Auto;
-    Index target_capacity = 0;                     ///< Desired target capacity (0 = tolerance-only)
-    Float tolerance = static_cast<Float>(1e-4);    ///< Maximum allowable relative exit-time loss
-    bool fallback_to_stable = true;                ///< Enable fallback on ill-conditioning
-};
-
-/// @brief Diagnostics recorded during the state shedding process.
-template <typename Index = std::size_t, typename Float = double>
-struct SheddingDiagnostics {
-    SheddingMethod requested_method = SheddingMethod::Auto;
-    SheddingMethod effective_method = SheddingMethod::Auto;
-    Index initial_states = 0;
-    Index shed_states = 0;
-    Index remaining_states = 0;
-    Float initial_mean_exit_time = static_cast<Float>(0);
-    Float total_estimated_loss = static_cast<Float>(0);
-    Float relative_loss = static_cast<Float>(0);
-    bool fallback_triggered = false;
-    std::string fallback_reason;
-};
-
-/// @brief Result of a state space shedding operation.
-template <typename Index = std::size_t, typename Float = double>
-struct SheddingResult {
-    std::vector<Index> kept_indices;
-    std::vector<Index> shed_indices;
-    std::vector<Float> state_losses;
-    SheddingDiagnostics<Index, Float> diagnostics;
-};
-
 /// @brief Sampled macrostep trajectory containing discrete states and jump times.
 template <typename State = std::vector<int>, typename Float = double>
 struct Trajectory {
@@ -112,15 +66,9 @@ struct Trajectory {
 template <typename Index = std::size_t, typename Float = double>
 struct ELSEOptions {
     Index capacity = 30;
-    int expansion_depth = 2;
+    int expansion_depth = 1;
     Float tolerance = static_cast<Float>(1e-6);
     std::size_t maximum_steps = 100000;
-};
-
-/// @brief Options for numerical contour inversion of the Laplace-domain density.
-template <typename Index = std::size_t>
-struct ContourOptions {
-    Index nodes = 14;
 };
 
 /// @brief Transient probability density solution at a given time point.

@@ -70,7 +70,7 @@ int main() {
 
         if (n <= 2000) {
             auto t0 = std::chrono::high_resolution_clock::now();
-            auto factor = num::cholesky(num::linalg::assume_spd(a_dense));
+            auto factor = num::cholesky(num::assume_spd(a_dense));
             num::Vector x_dense(n, 0.0);
             num::cholesky_solve(factor, b, x_dense);
             auto t1 = std::chrono::high_resolution_clock::now();

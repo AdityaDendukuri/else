@@ -4,10 +4,8 @@
 #include "else/types.hpp"
 #include <algorithm>
 #include <cmath>
-#include <numeric>
 #include <span>
 #include <stdexcept>
-#include <unordered_set>
 #include <vector>
 
 namespace else_sim {
@@ -15,12 +13,12 @@ namespace else_sim {
 template <typename Float, typename Index, typename State>
 class Subnetwork;
 
-/// @brief Method 1: Expected Visits / Residence Time Shedding
-template <typename Float = double, typename Index = std::size_t, typename State = std::vector<int>, typename Vec>
+/// Expected number of visits to each candidate state.
+template <typename Float = double, typename Index = std::size_t, typename State = std::vector<int>,
+          typename Vec>
 inline std::vector<Float>
-compute_expected_visits_losses(const Subnetwork<Float, Index, State> &subnetwork,
-                               const Vec &occupancy,
-                               std::span<const Index> candidate_indices) {
+expected_visit_scores(const Subnetwork<Float, Index, State> &subnetwork,
+                      const Vec &occupancy, std::span<const Index> candidate_indices) {
     std::vector<Float> losses;
     losses.reserve(candidate_indices.size());
     for (Index idx : candidate_indices) {
@@ -35,12 +33,12 @@ compute_expected_visits_losses(const Subnetwork<Float, Index, State> &subnetwork
     return losses;
 }
 
-/// @brief Method 2: Symmetrized Dirichlet Form Upper-Bound Shedding
-template <typename Float = double, typename Index = std::size_t, typename State = std::vector<int>, typename Vec>
+/// Symmetrized scores for a reversible generator.
+template <typename Float = double, typename Index = std::size_t, typename State = std::vector<int>,
+          typename Vec>
 inline std::vector<Float>
-compute_symmetrized_losses(const Subnetwork<Float, Index, State> &subnetwork,
-                           const Vec &occupancy,
-                           std::span<const Index> candidate_indices) {
+symmetrized_scores(const Subnetwork<Float, Index, State> &subnetwork, const Vec &occupancy,
+                   std::span<const Index> candidate_indices) {
     if (!subnetwork.is_reversible()) {
         throw std::invalid_argument("Symmetrized shedding requires a reversible Markov chain");
     }
@@ -67,7 +65,8 @@ compute_symmetrized_losses(const Subnetwork<Float, Index, State> &subnetwork,
             if (j != idx && j < subnetwork.size()) {
                 const Float u_j = static_cast<Float>(occupancy[j]);
                 const Float h_j = weights[j];
-                const Float phi_j = (h_j > static_cast<Float>(0)) ? (u_j / h_j) : static_cast<Float>(0);
+                const Float phi_j =
+                    (h_j > static_cast<Float>(0)) ? (u_j / h_j) : static_cast<Float>(0);
                 const Float s_ij = -R.values[k] * (h_j / h_i);
                 const Float diff = phi_i - phi_j;
                 dirichlet_sum += s_ij * (diff * diff);
@@ -78,95 +77,32 @@ compute_symmetrized_losses(const Subnetwork<Float, Index, State> &subnetwork,
     return losses;
 }
 
-/// @brief Method 3: Woodbury Resolvent Inverse Update
-template <typename Float = double, typename Index = std::size_t, typename State = std::vector<int>, typename Vec>
-inline std::vector<Float>
-compute_woodbury_losses(const Subnetwork<Float, Index, State> &subnetwork,
-                        const Vec &occupancy,
-                        std::span<const Index> candidate_indices) {
+/// Exact loss of mean exit time when each candidate is removed.
+template <typename Float = double, typename Index = std::size_t, typename State = std::vector<int>,
+          typename Vec>
+inline std::vector<Float> exact_cut_time_scores(const Subnetwork<Float, Index, State> &subnetwork,
+                                                const Vec &occupancy,
+                                                std::span<const Index> candidate_indices) {
     return subnetwork.cut_time_losses(occupancy, candidate_indices);
 }
 
-/// @brief Unified shedding loss dispatcher across Methods 1, 2, and 3.
-template <typename Float = double, typename Index = std::size_t, typename State = std::vector<int>, typename Vec>
-inline std::vector<Float>
-compute_shedding_losses(const Subnetwork<Float, Index, State> &subnetwork,
-                        const Vec &occupancy,
-                        std::span<const Index> candidate_indices,
-                        SheddingMethod method = SheddingMethod::CholeskyWoodbury) {
-    switch (method) {
-        case SheddingMethod::ExpectedVisits:
-            return compute_expected_visits_losses<Float, Index, State>(subnetwork, occupancy, candidate_indices);
-        case SheddingMethod::NormalizedSymmetrized:
-            return compute_symmetrized_losses<Float, Index, State>(subnetwork, occupancy, candidate_indices);
-        case SheddingMethod::CholeskyWoodbury:
-        case SheddingMethod::Auto:
-            return compute_woodbury_losses<Float, Index, State>(subnetwork, occupancy, candidate_indices);
-        default:
-            throw std::invalid_argument("unknown SheddingMethod specified");
-    }
-}
+/// Indices of the `count` smallest unprotected scores.
+template <typename Float = double, typename Index = std::size_t>
+inline std::vector<Index> lowest_scores(std::span<const Float> scores,
+                                        std::span<const Index> protected_indices,
+                                        Index count) {
+    std::vector<bool> protected_state(scores.size(), false);
+    for (Index i : protected_indices) protected_state[i] = true;
 
-/// @brief Shed states based on SheddingOptions and protected state indices.
-template <typename Float = double, typename Index = std::size_t, typename State = std::vector<int>, typename Vec>
-inline SheddingResult<Index, Float>
-shed_states(const Subnetwork<Float, Index, State> &subnetwork,
-            const Vec &occupancy,
-            std::span<const Index> protected_indices,
-            const SheddingOptions<Index, Float> &options = {}) {
-    const Index n = subnetwork.size();
-    std::unordered_set<Index> prot_set(protected_indices.begin(), protected_indices.end());
+    std::vector<std::pair<Float, Index>> ranked;
+    for (Index i = 0; i < scores.size(); ++i)
+        if (!protected_state[i]) ranked.push_back({scores[i], i});
 
-    std::vector<Index> candidates;
-    for (Index i = 0; i < n; ++i) {
-        if (!prot_set.count(i)) candidates.push_back(i);
-    }
-
-    std::vector<Index> all_indices(n);
-    std::iota(all_indices.begin(), all_indices.end(), static_cast<Index>(0));
-    const auto losses = compute_shedding_losses(subnetwork, occupancy, std::span<const Index>(all_indices), options.method);
-
-    Index target = options.target_capacity > 0 ? options.target_capacity : n;
-    if (target < protected_indices.size()) target = protected_indices.size();
-
-    const Index needed_removals = (n > target) ? (n - target) : 0;
-
-    std::vector<std::pair<Float, Index>> ranked_candidates;
-    for (Index c : candidates) {
-        ranked_candidates.push_back({losses[c], c});
-    }
-    std::sort(ranked_candidates.begin(), ranked_candidates.end());
-
-    std::unordered_set<Index> to_remove;
-    for (Index i = 0; i < needed_removals && i < ranked_candidates.size(); ++i) {
-        to_remove.insert(ranked_candidates[i].second);
-    }
-
-    SheddingResult<Index, Float> result;
-    result.state_losses = losses;
-    for (Index i = 0; i < n; ++i) {
-        if (to_remove.count(i)) {
-            result.shed_indices.push_back(i);
-        } else {
-            result.kept_indices.push_back(i);
-        }
-    }
-    result.diagnostics.initial_states = n;
-    result.diagnostics.shed_states = result.shed_indices.size();
-    result.diagnostics.remaining_states = result.kept_indices.size();
-    return result;
-}
-
-template <typename Float = double, typename Index = std::size_t, typename State = std::vector<int>, typename Vec, typename ProtIndex = Index>
-inline SheddingResult<Index, Float>
-shed_states(const Subnetwork<Float, Index, State> &subnetwork,
-            const Vec &occupancy,
-            std::initializer_list<ProtIndex> protected_indices,
-            const SheddingOptions<Index, Float> &options = {}) {
-    std::vector<Index> converted;
-    converted.reserve(protected_indices.size());
-    for (auto p : protected_indices) converted.push_back(static_cast<Index>(p));
-    return shed_states(subnetwork, occupancy, std::span<const Index>(converted.data(), converted.size()), options);
+    std::sort(ranked.begin(), ranked.end());
+    count = std::min(count, static_cast<Index>(ranked.size()));
+    std::vector<Index> selected(count);
+    for (Index i = 0; i < count; ++i) selected[i] = ranked[i].second;
+    return selected;
 }
 
 } // namespace else_sim

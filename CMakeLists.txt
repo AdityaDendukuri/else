@@ -19,19 +19,23 @@ target_include_directories(else
     $<INSTALL_INTERFACE:include>
 )
 
-include(FetchContent)
-FetchContent_Declare(
-    numerics
-    SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../numerics"
-)
-FetchContent_Declare(
-    markovkit
-    SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../markovkit"
-)
-FetchContent_MakeAvailable(numerics markovkit)
-find_package(OpenMP)
+include(CTest)
+option(ELSE_BUILD_BENCHMARKS "Build the dependency-free benchmark" ON)
+option(ELSE_BUILD_EXAMPLES "Build examples that use Markovkit and Numerics" OFF)
 
-enable_testing()
-add_subdirectory(tests)
-add_subdirectory(benchmarks)
-add_subdirectory(examples)
+if(BUILD_TESTING)
+  add_subdirectory(tests)
+endif()
+
+if(ELSE_BUILD_BENCHMARKS)
+  add_subdirectory(benchmarks)
+endif()
+
+if(ELSE_BUILD_EXAMPLES)
+  include(FetchContent)
+  FetchContent_Declare(numerics SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../numerics")
+  FetchContent_Declare(markovkit SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../markovkit")
+  FetchContent_MakeAvailable(numerics markovkit)
+  find_package(OpenMP)
+  add_subdirectory(examples)
+endif()

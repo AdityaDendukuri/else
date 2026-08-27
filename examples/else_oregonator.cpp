@@ -38,23 +38,26 @@ int main() {
         }};
 
     const markovkit::State initial{500, 1000, 2000};
+    // Oregonator reactions change total copy number by 0 or 2, so total/2
+    // gives adjacent block levels while spreading an ensemble over more blocks.
+    const auto block_level = [](const markovkit::State &x) { return (x[0] + x[1] + x[2]) / 2; };
     // Compare matched ELSE and SSA trajectory ensembles.
     const auto one_else = else_sim::else_ensemble(
         model, rates, initial, 1, 0.0, final_time,
-        {.capacity = subnetwork_capacity, .maximum_steps = simulation_steps}, 42);
+        {.capacity = subnetwork_capacity, .maximum_steps = simulation_steps}, 42, block_level);
     const std::vector<markovkit::Trajectory> one_ssa{
         ssa::gillespie(model, rates, initial, 0.0, final_time, 42, simulation_steps)};
     const auto many_else = else_sim::else_ensemble(
         model, rates, initial, 20, 0.0, final_time,
-        {.capacity = subnetwork_capacity, .maximum_steps = simulation_steps}, 42);
+        {.capacity = subnetwork_capacity, .maximum_steps = simulation_steps}, 42, block_level);
     std::vector<markovkit::Trajectory> many_ssa(20);
-    // Use matching seed ranges for the SSA ensemble with OpenMP parallelism.
-    #pragma omp parallel for schedule(dynamic)
+// Use matching seed ranges for the SSA ensemble with OpenMP parallelism.
+#pragma omp parallel for schedule(dynamic)
     for (int i = 0; i < 20; ++i) {
         const int seed = 42 + i;
-        many_ssa[i] = ssa::gillespie(model, rates, initial, 0.0, final_time, seed, simulation_steps);
+        many_ssa[i] =
+            ssa::gillespie(model, rates, initial, 0.0, final_time, seed, simulation_steps);
     }
-
     // Plot single paths above their ensemble counterparts.
     num::plt::subplot(2, 2);
     num::plt::plot_paths(one_else, labels, colors, "ELSE: 1 trajectory");
