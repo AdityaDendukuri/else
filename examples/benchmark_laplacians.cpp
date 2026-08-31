@@ -1,7 +1,7 @@
 #include "io/json.hpp"
 #include "io/sparse_json.hpp"
+#include "linear/sparse/sparse_op.hpp"
 #include "markovkit.hpp"
-#include "linalg/sparse/sparse_op.hpp"
 #include <approxchol/approxchol.hpp>
 #include <chrono>
 #include <cmath>
@@ -13,6 +13,10 @@
 
 class ApproxCholPreconditioner final {
   public:
+    using domain_type = num::Vector;
+    using codomain_type = num::Vector;
+    using math_propositions = num::math::type_list<num::axiom::positive_definite>;
+
     explicit ApproxCholPreconditioner(approxchol::CholeskyFactor<double> factor)
         : factor_(std::move(factor)), n_(factor_.order.size()), scratch_(n_, 0.0) {}
 
@@ -30,6 +34,11 @@ class ApproxCholPreconditioner final {
     approxchol::CholeskyFactor<double> factor_;
     num::idx n_;
     mutable std::vector<double> scratch_;
+};
+
+template <>
+struct num::math::model_of<ApproxCholPreconditioner> {
+    using laws = type_list<law::linear_map>;
 };
 
 approxchol::Graph<double> graph_from_sparse(const num::SparseMatrix &L) {

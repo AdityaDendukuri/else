@@ -1,3 +1,4 @@
+#include "else/restriction.hpp"
 #include "markovkit.hpp"
 #include <cmath>
 #include <numeric>
@@ -20,10 +21,10 @@ int main() {
         }};
     const std::vector<double> rates{birth_rate, death_rate};
 
-    cme::StateSpace states;
+    std::vector<markovkit::State> states;
     // The finite restriction contains molecule counts from zero to n-1.
     for (num::idx state = 0; state < n; ++state) {
-        states.add_state(markovkit::State{static_cast<int>(state)});
+        states.push_back(markovkit::State{static_cast<int>(state)});
     }
 
     // The full immigration-death CME has Poisson stationary weights.
@@ -32,10 +33,8 @@ int main() {
         h[state] = h[state - 1] * std::sqrt(birth_rate / (death_rate * state));
     }
 
-    auto restricted = cme::restrict_cme(states, model, rates);
     // Use reversibility to select the Cholesky solve path.
-    auto reversible = cme::reversible_generator(std::move(restricted), h);
-    else_sim::Subnetwork subnetwork(std::move(reversible));
+    auto subnetwork = else_sim::reversible_cme_subnetwork(model, rates, states, h);
     num::Vector source(n, 0.0);
     source[0] = 1.0;
     // Occupation measures expected time spent in each state before exit.

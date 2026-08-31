@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
-#include <map>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -21,8 +20,7 @@
 
 namespace else_sim {
 
-/// @brief Invert the Laplace-domain density propagated through an ELSE subnetwork chain
-/// via shifted resolvent linear solves on a modified Talbot contour.
+/// Invert the composed density with shifted resolvent solves.
 template <typename Float = double, typename Index = std::size_t, typename State = std::vector<int>>
 class LaplaceDensitySolver {
     struct BoundaryTransfer {
@@ -55,16 +53,14 @@ class LaplaceDensitySolver {
 #endif
         }
 
-        // Build boundary transfers between successive subnetworks
+        // C_s maps an exit flux from subnetwork s into the matching state of s+1.
         transfers_.resize(subnetworks_.size());
         for (std::size_t s = 0; s + 1 < subnetworks_.size(); ++s) {
             const auto &next_sub = subnetworks_[s + 1];
             for (const auto &edge : subnetworks_[s].boundary()) {
-                int pos = next_sub.find(edge.destination);
-                if (pos >= 0) {
-                    transfers_[s].push_back(
-                        {edge.source, static_cast<Index>(pos), edge.rate});
-                }
+                const Index target = next_sub.find(edge.destination);
+                if (target < next_sub.size())
+                    transfers_[s].push_back({edge.source, target, edge.rate});
             }
         }
     }
@@ -73,20 +69,14 @@ class LaplaceDensitySolver {
 
     [[nodiscard]] DensitySolution<State, Float> solve(const State &initial, Float time,
                                                       Index nodes = 14) {
-        std::map<State, Float> init_map;
-        init_map[initial] = static_cast<Float>(1.0);
-        return solve(init_map, time, nodes);
-    }
-
-    [[nodiscard]] DensitySolution<State, Float> solve(const std::map<State, Float> &initial,
-                                                      Float time, Index nodes = 14) {
         if (!(time > static_cast<Float>(0))) {
             throw std::invalid_argument("Talbot density time must be positive");
         }
         const auto contour = talbot_contour<Float>(time, nodes);
         std::vector<Float> probability(states_.size(), static_cast<Float>(0));
 
-        // Buffers for subnetwork arrivals and occupations
+        // At each contour node, arrivals hold the Laplace-domain entrance density
+        // and occupations hold (sI - R_k)^{-1} arrivals.
         std::vector<std::vector<std::complex<Float>>> arrivals(subnetworks_.size());
         std::vector<std::vector<std::complex<Float>>> occupations(subnetworks_.size());
         for (std::size_t s = 0; s < subnetworks_.size(); ++s) {
@@ -100,15 +90,12 @@ class LaplaceDensitySolver {
                 std::fill(arrivals[s].begin(), arrivals[s].end(), std::complex<Float>(0, 0));
             }
 
-            // Initial condition enters subnetwork 0
-            for (const auto &[s, val] : initial) {
-                int pos = subnetworks_[0].find(s);
-                if (pos >= 0) {
-                    arrivals[0][static_cast<std::size_t>(pos)] += std::complex<Float>(val, 0);
-                }
-            }
+            // The point initial condition enters only the first subnetwork.
+            const Index initial_position = subnetworks_[0].find(initial);
+            if (initial_position < subnetworks_[0].size())
+                arrivals[0][initial_position] = Complex(1, 0);
 
-            // Propagate through subnetwork chain
+            // Compose successive ELSE steps as a resolvent solve followed by boundary flux.
             for (std::size_t s = 0; s < subnetworks_.size(); ++s) {
                 solve_resolvent(s, node.shift, arrivals[s], occupations[s]);
                 add_probability(s, node.weight, occupations[s], probability);
@@ -126,8 +113,7 @@ class LaplaceDensitySolver {
   private:
     using Complex = std::complex<Float>;
 
-    void solve_resolvent(std::size_t s, Complex shift,
-                         const std::vector<Complex> &arrival,
+    void solve_resolvent(std::size_t s, Complex shift, const std::vector<Complex> &arrival,
                          std::vector<Complex> &occupation) const {
 #if ELSE_HAS_AUTO_RESOLVENT
         solvers_[s].factorize(shift);
@@ -140,13 +126,12 @@ class LaplaceDensitySolver {
             for (Index k = R.row_ptr[i]; k < R.row_ptr[i + 1]; ++k)
                 shifted(i, R.col_idx[k]) -= Complex(R.values[k], 0);
         }
-        auto factor = factorize_lu<Complex, Index>(std::move(shifted));
+        auto factor = factorize_lu<Complex>(std::move(shifted));
         lu_solve(factor, arrival, occupation);
 #endif
     }
 
-    void add_probability(std::size_t s, Complex weight,
-                         const std::vector<Complex> &occupation,
+    void add_probability(std::size_t s, Complex weight, const std::vector<Complex> &occupation,
                          std::vector<Float> &probability) const {
         const auto &sub = subnetworks_[s];
         for (Index i = 0; i < sub.size(); ++i)
@@ -155,6 +140,7 @@ class LaplaceDensitySolver {
 
     void transfer(std::size_t s, const std::vector<Complex> &occupation,
                   std::vector<Complex> &next_arrival) const {
+        // arrival_{s+1} += C_s occupation_s; summing edges sums all exit states.
         for (const auto &edge : transfers_[s])
             next_arrival[edge.target] += edge.rate * occupation[edge.source];
     }
@@ -166,13 +152,14 @@ class LaplaceDensitySolver {
             total += value;
         }
         if (total > static_cast<Float>(0))
-            for (auto &value : probability) value /= total;
+            for (auto &value : probability)
+                value /= total;
         return probability;
     }
 
     std::vector<Subnetwork<Float, Index, State>> subnetworks_;
     std::vector<State> states_;
-    std::map<State, std::size_t> position_;
+    std::unordered_map<State, std::size_t, StateHash<State>> position_;
     std::vector<std::vector<BoundaryTransfer>> transfers_;
 #if ELSE_HAS_AUTO_RESOLVENT
     mutable std::vector<num::AutoResolventSolver> solvers_;
@@ -217,10 +204,7 @@ density_subnetworks(const ReactionSystem &model, const Rates &rates, const State
             for (std::size_t rx = 0; rx < model.changes.size(); ++rx) {
                 if (model.propensities[rx](current, rates, static_cast<Float>(0)) >
                     static_cast<Float>(0)) {
-                    State next_st = current;
-                    for (std::size_t d = 0; d < model.changes[rx].size(); ++d) {
-                        next_st[d] += model.changes[rx][d];
-                    }
+                    State next_st = apply_change(current, model.changes[rx]);
                     if (workspace_set.insert(next_st).second) {
                         workspace_states.push_back(next_st);
                         if (workspace_states.size() >= options.capacity)
@@ -238,9 +222,9 @@ density_subnetworks(const ReactionSystem &model, const Rates &rates, const State
 
         std::vector<Float> entrance(result.back().size(), static_cast<Float>(0));
         for (const auto &[s, w] : density) {
-            int pos = result.back().find(s);
-            if (pos >= 0)
-                entrance[static_cast<std::size_t>(pos)] = w;
+            const Index position = result.back().find(s);
+            if (position < result.back().size())
+                entrance[position] = w;
         }
         const auto occ = result.back().occupation(entrance);
 

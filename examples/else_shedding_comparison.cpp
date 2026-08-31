@@ -1,3 +1,4 @@
+#include "else/restriction.hpp"
 #include "markovkit.hpp"
 #include <algorithm>
 #include <chrono>
@@ -16,7 +17,7 @@ int main() {
     constexpr double birth_rate = 12.0;
     constexpr double death_rate = 1.0;
 
-    // 1. Define Immigration-Death reaction network
+    // Define the immigration-death reaction network.
     markovkit::ReactionSystem model{
         .changes = {{1}, {-1}},
         .propensities = {
@@ -27,9 +28,9 @@ int main() {
         }};
     const std::vector<double> rates{birth_rate, death_rate};
 
-    cme::StateSpace states;
+    std::vector<markovkit::State> states;
     for (num::idx state = 0; state < n; ++state) {
-        states.add_state(markovkit::State{static_cast<int>(state)});
+        states.push_back(markovkit::State{static_cast<int>(state)});
     }
 
     // Stationary Poisson weights for reversible scaling
@@ -38,23 +39,19 @@ int main() {
         h[state] = h[state - 1] * std::sqrt(birth_rate / (death_rate * state));
     }
 
-    auto restricted = cme::restrict_cme(states, model, rates);
-    auto reversible = cme::reversible_generator(std::move(restricted), h);
-    else_sim::Subnetwork subnetwork(std::move(reversible));
+    auto subnetwork = else_sim::reversible_cme_subnetwork(model, rates, states, h);
 
     // Initial entrance in state 0
     num::Vector entrance(n, 0.0);
     entrance[0] = 1.0;
     const auto u = subnetwork.occupation(entrance);
 
-    // 2. Component-by-Component Floating-Point Error Evaluation
-    std::cout << "--- 1. Component-Wise Floating-Point Error (Woodbury vs Naive Ground Truth) ---\n\n";
-    std::cout << std::left << std::setw(8) << "State"
-              << std::setw(16) << "Woodbury Loss"
-              << std::setw(16) << "Naive Loss"
-              << std::setw(18) << "Relative Error"
-              << std::setw(20) << "safe_add Bound"
-              << std::setw(20) << "Backward Residual" << "\n";
+    // Compare each Woodbury score with a fresh reduced solve.
+    std::cout
+        << "--- 1. Component-Wise Floating-Point Error (Woodbury vs Naive Ground Truth) ---\n\n";
+    std::cout << std::left << std::setw(8) << "State" << std::setw(16) << "Woodbury Loss"
+              << std::setw(16) << "Naive Loss" << std::setw(18) << "Relative Error" << std::setw(20)
+              << "safe_add Bound" << std::setw(20) << "Backward Residual" << "\n";
     std::cout << std::string(98, '-') << "\n";
 
     std::vector<double> state_indices(n);
@@ -93,24 +90,26 @@ int main() {
         max_backward_res = std::max(max_backward_res, bres);
 
         if (i < 8 || i >= n - 5 || i % 5 == 0) {
-            std::cout << std::left << std::setw(8) << i
-                      << std::setw(16) << std::scientific << std::setprecision(3) << loss_woodbury
-                      << std::setw(16) << std::scientific << std::setprecision(3) << loss_naive
-                      << std::setw(18) << std::scientific << std::setprecision(3) << rel_err
-                      << std::setw(20) << std::scientific << std::setprecision(3) << safe_bound
-                      << std::setw(20) << std::scientific << std::setprecision(3) << bres << "\n";
+            std::cout << std::left << std::setw(8) << i << std::setw(16) << std::scientific
+                      << std::setprecision(3) << loss_woodbury << std::setw(16) << std::scientific
+                      << std::setprecision(3) << loss_naive << std::setw(18) << std::scientific
+                      << std::setprecision(3) << rel_err << std::setw(20) << std::scientific
+                      << std::setprecision(3) << safe_bound << std::setw(20) << std::scientific
+                      << std::setprecision(3) << bres << "\n";
         }
     }
-    std::cout << "\nMax Component-Wise Relative Error:     " << std::scientific << max_rel_error << "\n";
-    std::cout << "Max safe_add Precision Bound:         " << std::scientific << max_safe_add_bound << "\n";
-    std::cout << "Max Component-Wise Backward Residual: " << std::scientific << max_backward_res << "\n\n";
+    std::cout << "\nMax Component-Wise Relative Error:     " << std::scientific << max_rel_error
+              << "\n";
+    std::cout << "Max safe_add Precision Bound:         " << std::scientific << max_safe_add_bound
+              << "\n";
+    std::cout << "Max Component-Wise Backward Residual: " << std::scientific << max_backward_res
+              << "\n\n";
 
-    // 3. Block Cut Set Scaling & Speedup Benchmark
-    std::cout << "--- 2. Block Cut Set Benchmark: Woodbury Principal Inversion vs Naive Scratch ---\n\n";
-    std::cout << std::left << std::setw(14) << "Block Size k"
-              << std::setw(18) << "Woodbury (us)"
-              << std::setw(18) << "Naive (us)"
-              << std::setw(16) << "Rel Discrepancy" << "\n";
+    // Measure how the update behaves as the removed block grows.
+    std::cout
+        << "--- 2. Block Cut Set Benchmark: Woodbury Principal Inversion vs Naive Scratch ---\n\n";
+    std::cout << std::left << std::setw(14) << "Block Size k" << std::setw(18) << "Woodbury (us)"
+              << std::setw(18) << "Naive (us)" << std::setw(16) << "Rel Discrepancy" << "\n";
     std::cout << std::string(66, '-') << "\n";
 
     const std::vector<num::idx> block_sizes = {1, 2, 4, 8, 12, 16, 20};
@@ -157,17 +156,23 @@ int main() {
         auto t3 = std::chrono::high_resolution_clock::now();
         double n_us = std::chrono::duration<double, std::micro>(t3 - t2).count() / repetitions;
 
-        std::cout << std::left << std::setw(14) << k
-                  << std::setw(18) << std::fixed << std::setprecision(2) << w_us
-                  << std::setw(18) << std::fixed << std::setprecision(2) << n_us
-                  << std::setw(16) << std::scientific << std::setprecision(2) << rel_diff << "\n";
+        std::cout << std::left << std::setw(14) << k << std::setw(18) << std::fixed
+                  << std::setprecision(2) << w_us << std::setw(18) << std::fixed
+                  << std::setprecision(2) << n_us << std::setw(16) << std::scientific
+                  << std::setprecision(2) << rel_diff << "\n";
     }
     std::cout << "\n";
 
-    // 4. Generate Combined Visual Plot
-    num::plt::plot(state_indices, rel_errors, "Relative Discrepancy |Loss_{Woodbury} - Loss_{Naive}| / Loss_{Naive}", "lines lw 2 lc rgb '#c0392b'");
-    num::plt::plot(state_indices, safe_add_bounds, "safe\\_add Precision Bound (\\varepsilon_{mach} |x| / x)", "lines dt 2 lw 2 lc rgb '#27ae60'");
-    num::plt::plot(state_indices, backward_residuals, "Linear Residual ||Z_{SS} c - u_S||_{\\infty}", "lines dt 3 lw 2 lc rgb '#2980b9'");
+    // Plot error and runtime against removed block size.
+    num::plt::plot(state_indices, rel_errors,
+                   "Relative Discrepancy |Loss_{Woodbury} - Loss_{Naive}| / Loss_{Naive}",
+                   "lines lw 2 lc rgb '#c0392b'");
+    num::plt::plot(state_indices, safe_add_bounds,
+                   "safe\\_add Precision Bound (\\varepsilon_{mach} |x| / x)",
+                   "lines dt 2 lw 2 lc rgb '#27ae60'");
+    num::plt::plot(state_indices, backward_residuals,
+                   "Linear Residual ||Z_{SS} c - u_S||_{\\infty}",
+                   "lines dt 3 lw 2 lc rgb '#2980b9'");
     num::plt::title("ELSE Cut-Time Update Precision & Floating-Point Error Metrics");
     num::plt::xlabel("Removed State Index j");
     num::plt::ylabel("Relative Precision / Error");
@@ -185,8 +190,7 @@ int main() {
     num::plt::plot(plotted_block_sizes, block_relative_discrepancies,
                    "Measured Woodbury--direct discrepancy",
                    "linespoints pt 5 ps 0.8 lw 2 lc rgb '#c0392b'");
-    num::plt::plot(plotted_block_sizes, precision_tolerances,
-                   "Acceptance tolerance 10^{-6}",
+    num::plt::plot(plotted_block_sizes, precision_tolerances, "Acceptance tolerance 10^{-6}",
                    "lines dt 2 lw 2 lc rgb '#2c3e50'");
     num::plt::title("Accumulated Floating-Point Check for Block Shedding");
     num::plt::xlabel("Removed block size |S|");

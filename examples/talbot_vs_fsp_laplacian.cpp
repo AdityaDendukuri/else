@@ -3,9 +3,9 @@
 #include <cmath>
 #include <iomanip>
 #include <iostream>
+#include <numerics.hpp>
 #include <random>
 #include <vector>
-#include <numerics.hpp>
 
 namespace {
 
@@ -53,9 +53,9 @@ int main() {
     const idx N = 120;
     std::mt19937_64 rng(12345);
 
-    // Generate connected random Markov jump generator via graph library
-    Graph G = graph::erdos_renyi(N, 0.08, rng, /*ensure_connected=*/true, 0.5, 2.0);
-    Matrix Q = G.dense_markov_generator(/*column_oriented=*/true);
+    // Generate a connected random Markov generator.
+    Graph G = structures::erdos_renyi(N, 0.08, rng, true, 0.5, 2.0);
+    Matrix Q = linear::dense_markov_generator(G, true);
     Vector p0 = unit_vector(N, 0);
 
     HessenbergResolventSolver hess_solver(Q);
@@ -119,9 +119,7 @@ int main() {
 
     std::vector<idx> order(N);
     std::iota(order.begin(), order.end(), 0);
-    std::sort(order.begin(), order.end(), [&](idx a, idx b) {
-        return p_exact[a] > p_exact[b];
-    });
+    std::sort(order.begin(), order.end(), [&](idx a, idx b) { return p_exact[a] > p_exact[b]; });
 
     std::vector<double> rank_indices(N);
     std::vector<double> exact_sorted(N);

@@ -31,7 +31,8 @@ void test_params(double scale, const std::string &name) {
     const markovkit::State initial_state{static_cast<int>(std::round(17.0 * scale / 0.2)), 1};
     constexpr double final_time = 500.0;
 
-    std::cout << "\n=== Testing " << name << " (scale=" << scale << ", start=[" << initial_state[0] << ", " << initial_state[1] << "]) ===\n";
+    std::cout << "\n=== Testing " << name << " (scale=" << scale << ", start=[" << initial_state[0]
+              << ", " << initial_state[1] << "]) ===\n";
 
     // Test SSA
     int ssa_switches = 0;
@@ -50,10 +51,10 @@ void test_params(double scale, const std::string &name) {
     std::cout << "  SSA switches: " << ssa_switches << "/10 paths\n";
 
     // Test ELSE
-    else_sim::ELSEOptions opt{.capacity = 300, .expansion_depth = 1, .tolerance = 1e-12, .maximum_steps = 100000};
-    auto ens = else_sim::else_ensemble(
-        model, rates, initial_state, 20, 0.0, final_time, opt, 42,
-        [](const markovkit::State &x) { return x[0]; });
+    else_sim::ELSEOptions opt{
+        .capacity = 300, .expansion_depth = 1, .tolerance = 1e-12, .maximum_steps = 100000};
+    auto ens = else_sim::else_ensemble(model, rates, initial_state, 20, 0.0, final_time, opt, 42,
+                                       [](const markovkit::State &x) { return x[0]; });
     int else_switches = 0;
     for (const auto &traj : ens) {
         int max_u = 0, max_v = 0;

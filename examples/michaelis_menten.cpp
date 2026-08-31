@@ -31,9 +31,9 @@ int main() {
         fsp::solve_adaptive_fsp(problem, {.eps_dt = 0.1, .flux_tolerance = 1e-10});
 
     // Solve the same terminal density through ELSE subnetworks.
-    auto subnetworks = else_sim::density_subnetworks(model, rates, initial, 30,
-                                                     {.capacity = 60, .expansion_depth = 0},
-                                                     [](const markovkit::State &x) { return x[0]; });
+    auto subnetworks = else_sim::density_subnetworks(
+        model, rates, initial, 30, {.capacity = 60, .expansion_depth = 0},
+        [](const markovkit::State &x) { return x[0]; });
     const auto else_solution =
         else_sim::LaplaceDensitySolver(std::move(subnetworks)).solve(initial, time);
 

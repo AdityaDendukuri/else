@@ -15,9 +15,8 @@ int main() {
     const markovkit::State initial{0};
 
     // Simulate by sampling exits from small local subnetworks.
-    const auto path = else_sim::else_trajectory(
-        model, rates, initial, 0.0, 20.0, {.capacity = 12}, 42,
-        [](const markovkit::State &x) { return x[0]; });
+    const auto path = else_sim::else_trajectory(model, rates, initial, 0.0, 20.0, {.capacity = 12},
+                                                42, [](const markovkit::State &x) { return x[0]; });
 
     // Extract the scalar count from each recorded state.
     const auto counts = markovkit::trajectory_component(path, 0);

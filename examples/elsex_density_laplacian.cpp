@@ -1,6 +1,10 @@
+/// Committor evolution from each basin, on the numerics-based ELSE.
+///
+/// A direct port of density_laplacian.cpp: same data, same subnetwork sizes,
+/// same contour, same plot. Only the ELSE calls differ.
 #include "container/util/math.hpp"
-#include "else/density.hpp"
-#include "else/laplacian.hpp"
+#include "elsex/density.hpp"
+#include "elsex/laplacian.hpp"
 #include "io/json.hpp"
 #include "io/sparse_json.hpp"
 #include "plot/plot.hpp"
@@ -10,6 +14,7 @@
 #include <chrono>
 #include <cmath>
 #include <iostream>
+#include <span>
 #include <vector>
 
 int main() {
@@ -35,13 +40,14 @@ int main() {
 #pragma omp parallel for schedule(dynamic)
     for (std::size_t panel = 0; panel < count; ++panel) {
         // Build two consecutive subnetworks around the starting state.
-        auto subnetworks = else_sim::laplacian_restrictions(laplacian, h, starts[panel], 500, 2);
+        auto subnetworks = elsex::laplacian_restrictions(laplacian, std::span<const double>(h),
+                                                         starts[panel], 500, 2);
 
-        else_sim::LaplaceDensitySolver density(std::move(subnetworks));
+        auto density = elsex::make_density_chain(std::move(subnetworks));
 
         for (double time : times) {
-            const auto solution = density.solve(std::vector<int>{static_cast<int>(starts[panel])},
-                                                time, /*nodes=*/14);
+            const auto solution = elsex::inverse_laplace_density(
+                density, std::vector<int>{static_cast<int>(starts[panel])}, time, /*modes=*/14);
 
             // Project the density onto each committor.
             for (std::size_t obs = 0; obs < count; ++obs) {
@@ -71,12 +77,12 @@ int main() {
         }
         num::plt::next();
     }
-    num::plt::savefig("density_laplacian.png");
+    num::plt::savefig("elsex_density_laplacian.png");
 
     auto t_end = std::chrono::high_resolution_clock::now();
     double total_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-    std::cout << "density_laplacian completed in " << total_ms
-              << " ms -> saved density_laplacian.png\n";
+    std::cout << "elsex_density_laplacian completed in " << total_ms
+              << " ms -> saved elsex_density_laplacian.png\n";
 
     return 0;
 }

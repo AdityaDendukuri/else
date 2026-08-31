@@ -1,3 +1,8 @@
+/// Oregonator: matched ELSE and SSA ensembles, on the numerics-based ELSE.
+///
+/// A direct port of else_oregonator.cpp with one difference that shows up in the
+/// Uses the same block level as the legacy Oregonator example.
+#include "elsex/ensemble.hpp"
 #include "markovkit.hpp"
 #include <array>
 #include <chrono>
@@ -40,25 +45,30 @@ int main() {
         }};
 
     const markovkit::State initial{500, 1000, 2000};
-    // Oregonator reactions change total copy number by 0 or 2, so total/2
-    // gives adjacent block levels while spreading an ensemble over more blocks.
-    const auto block_level = [](const markovkit::State &x) { return (x[0] + x[1] + x[2]) / 2; };
-    // Compare matched ELSE and SSA trajectory ensembles.
-    const auto t_start = std::chrono::high_resolution_clock::now();
-    const auto one_else = else_sim::else_ensemble(
-        model, rates, initial, 1, 0.0, final_time,
-        {.capacity = subnetwork_capacity, .maximum_steps = simulation_steps}, 42, block_level);
+    const elsex::EnsembleOptions options{.capacity = subnetwork_capacity,
+                                         .maximum_steps = simulation_steps};
+    const auto block_level = [](const markovkit::State &x) {
+        return (x[0] + x[1] + x[2]) / 2;
+    };
+
+    auto t_start = std::chrono::high_resolution_clock::now();
+    const auto one_else =
+        elsex::else_ensemble(model, rates, initial, 1, 0.0, final_time, options, 42, block_level);
     const auto t_one = std::chrono::high_resolution_clock::now();
-    const std::vector<markovkit::Trajectory> one_ssa{
-        ssa::gillespie(model, rates, initial, 0.0, final_time, 42, simulation_steps)};
-    const auto many_else = else_sim::else_ensemble(
-        model, rates, initial, 20, 0.0, final_time,
-        {.capacity = subnetwork_capacity, .maximum_steps = simulation_steps}, 42, block_level);
-    const auto t_many = std::chrono::high_resolution_clock::now();
-    std::cout << "legacy ELSE timing: one="
+    const auto many_else =
+        elsex::else_ensemble(model, rates, initial, 20, 0.0, final_time, options, 42, block_level);
+    auto t_else = std::chrono::high_resolution_clock::now();
+    std::cout << "ELSE macrosteps: one=" << one_else.front().times.size()
+              << ", first of twenty=" << many_else.front().times.size() << '\n';
+    std::cout << "ELSE final times: one=" << one_else.front().times.back()
+              << ", first of twenty=" << many_else.front().times.back() << '\n';
+    std::cout << "ELSE timing: one="
               << std::chrono::duration<double, std::milli>(t_one - t_start).count()
               << " ms, twenty="
-              << std::chrono::duration<double, std::milli>(t_many - t_one).count() << " ms\n";
+              << std::chrono::duration<double, std::milli>(t_else - t_one).count() << " ms\n";
+
+    const std::vector<markovkit::Trajectory> one_ssa{
+        ssa::gillespie(model, rates, initial, 0.0, final_time, 42, simulation_steps)};
     std::vector<markovkit::Trajectory> many_ssa(20);
 // Use matching seed ranges for the SSA ensemble with OpenMP parallelism.
 #pragma omp parallel for schedule(dynamic)
@@ -67,6 +77,7 @@ int main() {
         many_ssa[i] =
             ssa::gillespie(model, rates, initial, 0.0, final_time, seed, simulation_steps);
     }
+
     // Plot single paths above their ensemble counterparts.
     num::plt::subplot(2, 2);
     num::plt::plot_paths(one_else, labels, colors, "ELSE: 1 trajectory");
@@ -76,5 +87,10 @@ int main() {
     num::plt::plot_paths(many_else, labels, colors, "ELSE: 20 trajectories");
     num::plt::next();
     num::plt::plot_paths(many_ssa, labels, colors, "SSA: 20 trajectories");
-    num::plt::savefig("oregonator_else_ssa.png");
+    num::plt::savefig("elsex_oregonator_else_ssa.png");
+
+    const double else_ms = std::chrono::duration<double, std::milli>(t_else - t_start).count();
+    std::cout << "elsex oregonator ELSE portion: " << else_ms
+              << " ms -> saved elsex_oregonator_else_ssa.png\n";
+    return 0;
 }

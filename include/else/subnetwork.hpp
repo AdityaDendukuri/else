@@ -7,11 +7,10 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <memory>
 #include <numeric>
+#include <optional>
 #include <span>
 #include <stdexcept>
-#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -22,118 +21,47 @@ namespace else_sim {
 template <typename Float = double, typename Index = std::size_t, typename State = std::vector<int>>
 class Subnetwork {
   public:
-    using FloatType = Float;
-    using IndexType = Index;
-    using StateType = State;
     using MatrixType = Matrix<Float>;
     using SparseMatrixType = SparseMatrix<Float, Index>;
     using VectorType = std::vector<Float>;
 
-    Subnetwork() = default;
-
     /// @brief Primary constructor for general (non-reversible) subnetwork.
     Subnetwork(std::vector<State> states, SparseMatrixType R,
                std::vector<BoundaryTransition<Index, State, Float>> boundary)
-        : states_(std::move(states)), R_(std::move(R)), boundary_(std::move(boundary)) {
-        initialize();
-        solver_ = std::make_unique<SolverImpl>(R_, std::vector<Index>{});
-    }
+        : Subnetwork(std::move(states), std::move(R), std::move(boundary), std::vector<Index>{}) {}
 
     /// @brief General subnetwork with an explicit block-tridiagonal ordering.
     Subnetwork(std::vector<State> states, SparseMatrixType R,
                std::vector<BoundaryTransition<Index, State, Float>> boundary,
-               std::vector<Index> levels)
+               std::vector<Index> levels, bool factorize = true)
         : states_(std::move(states)), R_(std::move(R)), boundary_(std::move(boundary)) {
         initialize();
-        solver_ = std::make_unique<SolverImpl>(R_, std::move(levels));
+        if (factorize)
+            solver_.emplace(R_, std::move(levels));
     }
 
     /// @brief Primary constructor for reversible subnetwork with stationary weights.
     Subnetwork(std::vector<State> states, SparseMatrixType R,
                std::vector<BoundaryTransition<Index, State, Float>> boundary,
                std::vector<Float> stationary_sqrt)
-        : states_(std::move(states)), R_(std::move(R)), boundary_(std::move(boundary)),
-          stationary_weights_(std::move(stationary_sqrt)) {
-        initialize();
-        MatrixType S(states_.size(), states_.size(), static_cast<Float>(0));
-        for (Index i = 0; i < states_.size(); ++i) {
-            for (Index k = R_.row_ptr[i]; k < R_.row_ptr[i + 1]; ++k) {
-                const Index j = R_.col_idx[k];
-                S(i, j) = -R_.values[k] * (stationary_weights_[j] / stationary_weights_[i]);
-            }
-        }
-        solver_ = std::make_unique<SolverImpl>(std::move(S), stationary_weights_);
-    }
+        : Subnetwork(std::move(states), std::move(R), std::move(boundary),
+                     std::move(stationary_sqrt), std::vector<Index>{}) {}
 
     /// @brief Reversible subnetwork with an explicit block-tridiagonal ordering.
     Subnetwork(std::vector<State> states, SparseMatrixType R,
                std::vector<BoundaryTransition<Index, State, Float>> boundary,
                std::vector<Float> stationary_sqrt, std::vector<Index> levels)
         : states_(std::move(states)), R_(std::move(R)), boundary_(std::move(boundary)),
-          stationary_weights_(std::move(stationary_sqrt)) {
+          stationary_sqrt_(std::move(stationary_sqrt)) {
         initialize();
-        SparseMatrixType S = R_;
+        // S_ij = -R_ij sqrt(pi_j/pi_i) is symmetric positive definite.
+        auto symmetric = R_;
         for (Index i = 0; i < states_.size(); ++i)
-            for (Index k = S.row_ptr[i]; k < S.row_ptr[i + 1]; ++k) {
-                const Index j = S.col_idx[k];
-                S.values[k] *= -stationary_weights_[j] / stationary_weights_[i];
+            for (Index k = symmetric.row_ptr[i]; k < symmetric.row_ptr[i + 1]; ++k) {
+                const Index j = symmetric.col_idx[k];
+                symmetric.values[k] *= -stationary_sqrt_[j] / stationary_sqrt_[i];
             }
-        solver_ =
-            std::make_unique<SolverImpl>(std::move(S), stationary_weights_, std::move(levels));
-    }
-
-    /// @brief Construct from a RestrictedGenerator object (such as cme::RestrictedGenerator).
-    template <typename RestrictedGen>
-    requires requires(RestrictedGen r) {
-        r.states;
-        r.generator;
-        r.boundary;
-    }
-    explicit Subnetwork(RestrictedGen &&gen) : states_(std::forward<RestrictedGen>(gen).states) {
-        const auto &g = gen.generator;
-        R_.rows = static_cast<Index>(g.n_rows());
-        R_.cols = static_cast<Index>(g.n_cols());
-        R_.row_ptr.assign(g.row_ptr(), g.row_ptr() + g.n_rows() + 1);
-        R_.col_idx.assign(g.col_idx(), g.col_idx() + g.nnz());
-        R_.values.assign(g.values(), g.values() + g.nnz());
-        boundary_.reserve(gen.boundary.size());
-        for (const auto &b : gen.boundary) {
-            boundary_.push_back(
-                {static_cast<Index>(b.source), b.destination, static_cast<Float>(b.rate)});
-        }
-        initialize();
-        solver_ = std::make_unique<SolverImpl>(R_, std::vector<Index>{});
-    }
-
-    /// @brief Construct from a ReversibleGenerator object (such as cme::ReversibleGenerator).
-    template <typename ReversibleGen>
-    requires requires(ReversibleGen r) {
-        r.restricted;
-        r.stationary_sqrt;
-    }
-    explicit Subnetwork(ReversibleGen &&gen)
-        : states_(std::forward<ReversibleGen>(gen).restricted.states),
-          stationary_weights_(std::forward<ReversibleGen>(gen).stationary_sqrt) {
-        const auto &g = gen.restricted.generator;
-        R_.rows = static_cast<Index>(g.n_rows());
-        R_.cols = static_cast<Index>(g.n_cols());
-        R_.row_ptr.assign(g.row_ptr(), g.row_ptr() + g.n_rows() + 1);
-        R_.col_idx.assign(g.col_idx(), g.col_idx() + g.nnz());
-        R_.values.assign(g.values(), g.values() + g.nnz());
-        boundary_.reserve(gen.restricted.boundary.size());
-        for (const auto &b : gen.restricted.boundary) {
-            boundary_.push_back(
-                {static_cast<Index>(b.source), b.destination, static_cast<Float>(b.rate)});
-        }
-        initialize();
-        MatrixType S(states_.size(), states_.size(), static_cast<Float>(0));
-        for (Index i = 0; i < states_.size(); ++i) {
-            for (Index k = R_.row_ptr[i]; k < R_.row_ptr[i + 1]; ++k) {
-                const Index j = R_.col_idx[k];
-                S(i, j) = -R_.values[k] * (stationary_weights_[j] / stationary_weights_[i]);
-            }
-        }
-        solver_ = std::make_unique<SolverImpl>(std::move(S), stationary_weights_);
+        solver_.emplace(std::move(symmetric), stationary_sqrt_, std::move(levels));
     }
 
     [[nodiscard]] Index size() const { return states_.size(); }
@@ -144,54 +72,37 @@ class Subnetwork {
     }
     [[nodiscard]] const SparseMatrixType &generator() const { return R_; }
     [[nodiscard]] bool is_reversible() const { return solver_ && solver_->is_cholesky(); }
-    [[nodiscard]] bool uses_sparse_solver() const {
+    [[nodiscard]] bool uses_block_solver() const {
         return solver_ && (solver_->block_factor || solver_->block_cholesky_factor);
     }
-    [[nodiscard]] std::span<const Float> stationary_weights() const { return stationary_weights_; }
+    [[nodiscard]] std::span<const Float> stationary_sqrt() const { return stationary_sqrt_; }
 
-    [[nodiscard]] int find(const State &x) const {
+    [[nodiscard]] Index find(const State &x) const {
         auto it = index_.find(x);
-        return it != index_.end() ? it->second : -1;
+        return it != index_.end() ? it->second : size();
     }
 
     /// @brief Solves (-R) u = p0 for transient occupation.
-    template <typename Vec>
-    [[nodiscard]] VectorType occupation(const Vec &start) const {
-        VectorType in(size(), static_cast<Float>(0));
-        for (std::size_t i = 0;
-             i < std::min(static_cast<std::size_t>(size()), static_cast<std::size_t>(start.size()));
-             ++i) {
-            in[i] = static_cast<Float>(start[i]);
-        }
-        VectorType u(size(), static_cast<Float>(0));
-        solver_->solve(in, u);
+    [[nodiscard]] VectorType occupation(std::span<const Float> start) const {
+        if (start.size() != size())
+            throw std::invalid_argument("occupation vector size must match subnetwork");
+        VectorType u;
+        solver_->solve(VectorType(start.begin(), start.end()), u);
         return u;
     }
 
-    /// @brief Computes first and second time-weighted occupation moments.
-    template <typename Mat>
-    [[nodiscard]] OccupationIntegrals<MatrixType> occupation_integrals(const Mat &starts) const {
+    /// For entrance columns E, compute U = Z E and V = Z U = Z^2 E.
+    [[nodiscard]] OccupationIntegrals<MatrixType>
+    occupation_integrals(const MatrixType &starts) const {
         OccupationIntegrals<MatrixType> integrals;
-        const Index n = size();
-        const Index cols = starts.cols();
-        integrals.occupation = MatrixType(n, cols, static_cast<Float>(0));
-        integrals.time_weighted_occupation = MatrixType(n, cols, static_cast<Float>(0));
-
-        MatrixType rhs(n, cols);
-        for (Index c = 0; c < cols; ++c)
-            for (Index r = 0; r < n; ++r)
-                rhs(r, c) = starts(r, c);
-        solver_->solve_multiple(rhs, integrals.occupation);
+        solver_->solve_multiple(starts, integrals.occupation);
         solver_->solve_multiple(integrals.occupation, integrals.time_weighted_occupation);
         return integrals;
     }
 
-    template <typename IntegralsType>
-    requires requires(IntegralsType v) {
-        v.occupation;
-    }
-    [[nodiscard]] std::vector<Float> exit_probabilities(const IntegralsType &integrals,
-                                                        Index column = 0) const {
+    [[nodiscard]] std::vector<Float>
+    exit_probabilities(const OccupationIntegrals<MatrixType> &integrals, Index column = 0) const {
+        // P(exit through b) = Delta_b Z_ba; normalization removes accumulated roundoff.
         std::vector<Float> probs;
         probs.reserve(boundary_states_.size());
         Float sum = static_cast<Float>(0);
@@ -210,9 +121,8 @@ class Subnetwork {
     }
 
     /// @brief Computes mean waiting time conditioned on exit via local boundary state.
-    template <typename IntegralsType>
-    [[nodiscard]] Float conditional_exit_time(const IntegralsType &integrals, Index boundary_state,
-                                              Index column = 0) const {
+    [[nodiscard]] Float conditional_exit_time(const OccupationIntegrals<MatrixType> &integrals,
+                                              Index boundary_state, Index column = 0) const {
         const Float occ = integrals.occupation(boundary_state, column);
         if (!(occ > static_cast<Float>(0)))
             return static_cast<Float>(0);
@@ -221,8 +131,7 @@ class Subnetwork {
     }
 
     /// @brief Evaluates cut-time losses for candidate states.
-    template <typename Vec>
-    [[nodiscard]] std::vector<Float> cut_time_losses(const Vec &occupancy,
+    [[nodiscard]] std::vector<Float> cut_time_losses(std::span<const Float> occupancy,
                                                      std::span<const Index> candidates) const {
         std::vector<Float> losses;
         losses.reserve(candidates.size());
@@ -232,22 +141,20 @@ class Subnetwork {
             }
             const Float occ_c = static_cast<Float>(occupancy[c]);
             const Float inv_diag = solver_->inverse_diagonal(c);
-            losses.push_back(occ_c / inv_diag);
+            losses.push_back(occ_c * solver_->inverse_column_sum(c) / inv_diag);
         }
         return losses;
     }
 
     /// @brief Evaluates cut-time losses for all states in the subnetwork.
-    template <typename Vec>
-    [[nodiscard]] std::vector<Float> cut_time_losses(const Vec &occupancy) const {
+    [[nodiscard]] std::vector<Float> cut_time_losses(std::span<const Float> occupancy) const {
         std::vector<Index> all(size());
         std::iota(all.begin(), all.end(), static_cast<Index>(0));
         return cut_time_losses(occupancy, all);
     }
 
     /// @brief Naive cut-time loss via reduced subnetwork solve.
-    template <typename Vec>
-    [[nodiscard]] Float naive_cut_time_loss(const Vec &occupancy,
+    [[nodiscard]] Float naive_cut_time_loss(std::span<const Float> occupancy,
                                             std::span<const Index> removed_states) const {
         const Index n = size();
         if (removed_states.size() >= n) {
@@ -261,10 +168,13 @@ class Subnetwork {
         }
 
         std::vector<Index> kept;
+        std::vector<Index> new_index(n, n);
         kept.reserve(n - removed_states.size());
         for (Index i = 0; i < n; ++i) {
-            if (!removed[i])
+            if (!removed[i]) {
+                new_index[i] = kept.size();
                 kept.push_back(i);
+            }
         }
         const Index m = kept.size();
 
@@ -273,19 +183,14 @@ class Subnetwork {
         for (Index i = 0; i < m; ++i) {
             for (Index k = R_.row_ptr[kept[i]]; k < R_.row_ptr[kept[i] + 1]; ++k) {
                 const Index j_orig = R_.col_idx[k];
-                if (!removed[j_orig]) {
-                    auto it = std::lower_bound(kept.begin(), kept.end(), j_orig);
-                    if (it != kept.end() && *it == j_orig) {
-                        const Index j_red = static_cast<Index>(std::distance(kept.begin(), it));
-                        R_red(i, j_red) = -R_.values[k];
-                    }
-                }
+                if (!removed[j_orig])
+                    R_red(i, new_index[j_orig]) = -R_.values[k];
                 p_red[i] += -R_.values[k] * static_cast<Float>(occupancy[j_orig]);
             }
         }
 
         VectorType u_red(m, static_cast<Float>(0));
-        auto lu_red = factorize_lu<Float, Index>(std::move(R_red));
+        auto lu_red = factorize_lu<Float>(std::move(R_red));
         if (lu_red.singular)
             return static_cast<Float>(0);
         lu_solve(lu_red, p_red, u_red);
@@ -297,17 +202,17 @@ class Subnetwork {
     }
 
     /// @brief Evaluates cut-time loss for a set of removed states.
-    template <typename Vec>
-    [[nodiscard]] Float cut_time_loss(const Vec &occupancy, std::span<const Index> removed_states,
+    [[nodiscard]] Float cut_time_loss(std::span<const Float> occupancy,
+                                      std::span<const Index> removed_states,
                                       Float tolerance = static_cast<Float>(1e-6)) const {
         return cut_time_loss_with_diagnostics(occupancy, removed_states, tolerance).loss;
     }
 
     /// @brief Detailed cut-time loss evaluation returning loss, floating-point error, and fallback
     /// diagnostics.
-    template <typename Vec>
     [[nodiscard]] CutTimeLossResult<Float>
-    cut_time_loss_with_diagnostics(const Vec &occupancy, std::span<const Index> removed_states,
+    cut_time_loss_with_diagnostics(std::span<const Float> occupancy,
+                                   std::span<const Index> removed_states,
                                    Float tolerance = static_cast<Float>(1e-6)) const {
         if (occupancy.size() != size()) {
             throw std::invalid_argument("cut-time occupation size must match subnetwork");
@@ -335,8 +240,10 @@ class Subnetwork {
         Float accumulated_err = static_cast<Float>(0);
         bool precision_acceptable = true;
 
+        // Delta tau = q_J^T Z_JJ^{-1} u_J, where q = Z^T 1.
         for (Index i = 0; i < r; ++i) {
-            if (!safe_add(delta_tau, accumulated_err, y_corr[i], tolerance)) {
+            const Float contribution = solver_->inverse_column_sum(removed_states[i]) * y_corr[i];
+            if (!safe_add(delta_tau, accumulated_err, contribution, tolerance)) {
                 precision_acceptable = false;
             }
         }
@@ -356,7 +263,7 @@ class Subnetwork {
     void initialize() {
         index_.clear();
         for (std::size_t i = 0; i < states_.size(); ++i) {
-            index_[states_[i]] = static_cast<int>(i);
+            index_[states_[i]] = static_cast<Index>(i);
         }
         const Index n = states_.size();
         exit_rates_.assign(n, static_cast<Float>(0));
@@ -373,12 +280,13 @@ class Subnetwork {
     }
 
     struct SolverImpl {
-        std::optional<LUFactor<Float, Index>> lu_factor;
+        std::optional<LUFactor<Float>> lu_factor;
         std::optional<BlockLUFactor<Float, Index>> block_factor;
         std::optional<BlockCholeskyFactor<Float, Index>> block_cholesky_factor;
         std::optional<CholeskyFactor<Float>> cholesky_factor;
-        std::vector<Float> weights;
+        std::vector<Float> stationary_sqrt;
         mutable std::vector<Float> inv_diag_cache;
+        mutable std::vector<Float> inv_column_sum_cache;
 
         static constexpr Index dense_limit = 32;
 
@@ -386,12 +294,12 @@ class Subnetwork {
             factor_lu(R, std::move(levels));
         }
 
-        SolverImpl(MatrixType S, std::vector<Float> w) : weights(std::move(w)) {
+        SolverImpl(MatrixType S, std::vector<Float> h) : stationary_sqrt(std::move(h)) {
             factor_dense_cholesky(S);
         }
 
         SolverImpl(SparseMatrixType S, std::vector<Float> w, std::vector<Index> levels)
-            : weights(std::move(w)) {
+            : stationary_sqrt(std::move(w)) {
             factor_cholesky(S, std::move(levels));
         }
 
@@ -407,28 +315,38 @@ class Subnetwork {
         }
 
         void solve_multiple(const MatrixType &b, MatrixType &x) const {
-            if (block_cholesky_factor)
-                solve_block_cholesky(b, x);
+            if (is_cholesky())
+                solve_multiple_cholesky(b, x);
             else if (block_factor)
                 block_solve(*block_factor, b, x);
             else
-                solve_columns(b, x);
+                lu_solve(*lu_factor, b, x);
         }
 
         Float inverse_diagonal(Index j) const {
             if (inv_diag_cache.empty()) {
+                // The exact cut-time rule eventually needs every Z_jj, so cache them together.
                 const Index n = size();
                 inv_diag_cache.resize(n, static_cast<Float>(0));
+                inv_column_sum_cache.resize(n, static_cast<Float>(0));
                 VectorType ej(n, static_cast<Float>(0));
                 VectorType x(n);
                 for (Index k = 0; k < n; ++k) {
                     ej[k] = static_cast<Float>(1);
                     solve(ej, x);
                     inv_diag_cache[k] = x[k];
+                    inv_column_sum_cache[k] =
+                        std::accumulate(x.begin(), x.end(), static_cast<Float>(0));
                     ej[k] = static_cast<Float>(0);
                 }
             }
             return inv_diag_cache[j];
+        }
+
+        Float inverse_column_sum(Index j) const {
+            if (inv_column_sum_cache.empty())
+                inverse_diagonal(j);
+            return inv_column_sum_cache[j];
         }
 
         void solve_block_inverse(std::span<const Index> indices, const VectorType &right_hand_side,
@@ -442,7 +360,7 @@ class Subnetwork {
 
         [[nodiscard]] Index size() const {
             if (is_cholesky())
-                return weights.size();
+                return stationary_sqrt.size();
             if (block_factor)
                 return block_factor->size;
             return lu_factor->LU.rows();
@@ -462,7 +380,7 @@ class Subnetwork {
                 block_factor = factorize_block_lu(R, levels, static_cast<Float>(-1));
                 return;
             }
-            lu_factor = factorize_lu<Float, Index>(dense_copy(R, static_cast<Float>(-1)));
+            lu_factor = factorize_lu<Float>(dense_copy(R, static_cast<Float>(-1)));
             if (lu_factor->singular)
                 throw std::runtime_error("subnetwork operator is singular");
         }
@@ -489,64 +407,51 @@ class Subnetwork {
         }
 
         void solve_cholesky(const VectorType &b, VectorType &x) const {
-            VectorType scaled_b(weights.size());
-            for (Index i = 0; i < weights.size(); ++i)
-                scaled_b[i] = b[i] / weights[i];
+            // If S = -D^{-1} R D, then (-R)^{-1}b = D S^{-1}D^{-1}b.
+            VectorType scaled_b = b;
+            kernel::raw::scale_rows(scaled_b.data(), stationary_sqrt.data(), scaled_b.size(), 1,
+                                    true);
 
             if (block_cholesky_factor)
                 block_solve(*block_cholesky_factor, scaled_b, x);
             else
                 cholesky_solve(*cholesky_factor, scaled_b, x);
 
-            for (Index i = 0; i < weights.size(); ++i)
-                x[i] *= weights[i];
+            kernel::raw::scale_rows(x.data(), stationary_sqrt.data(), x.size(), 1, false);
         }
 
-        void solve_block_cholesky(const MatrixType &b, MatrixType &x) const {
-            MatrixType scaled_b(b.rows(), b.cols());
-            for (Index i = 0; i < b.rows(); ++i)
-                for (Index c = 0; c < b.cols(); ++c)
-                    scaled_b(i, c) = b(i, c) / weights[i];
+        void solve_multiple_cholesky(const MatrixType &b, MatrixType &x) const {
+            MatrixType scaled_b = b;
+            kernel::raw::scale_rows(scaled_b.data(), stationary_sqrt.data(), scaled_b.rows(),
+                                    scaled_b.cols(), true);
 
-            block_solve(*block_cholesky_factor, scaled_b, x);
+            if (block_cholesky_factor)
+                block_solve(*block_cholesky_factor, scaled_b, x);
+            else
+                cholesky_solve(*cholesky_factor, scaled_b, x);
 
-            for (Index i = 0; i < x.rows(); ++i)
-                for (Index c = 0; c < x.cols(); ++c)
-                    x(i, c) *= weights[i];
-        }
-
-        void solve_columns(const MatrixType &b, MatrixType &x) const {
-            const Index n = size();
-            x = MatrixType(n, b.cols());
-            VectorType rhs(n), solution;
-            for (Index c = 0; c < b.cols(); ++c) {
-                for (Index i = 0; i < n; ++i)
-                    rhs[i] = b(i, c);
-                solve(rhs, solution);
-                for (Index i = 0; i < n; ++i)
-                    x(i, c) = solution[i];
-            }
+            kernel::raw::scale_rows(x.data(), stationary_sqrt.data(), x.rows(), x.cols(), false);
         }
 
         MatrixType inverse_block(std::span<const Index> indices) const {
             const Index r = indices.size();
             MatrixType block(r, r, static_cast<Float>(0));
-            VectorType e(size(), static_cast<Float>(0));
-            VectorType column(size());
+            MatrixType basis(size(), r, static_cast<Float>(0));
+            for (Index j = 0; j < r; ++j)
+                basis(indices[j], j) = static_cast<Float>(1);
 
-            for (Index j = 0; j < r; ++j) {
-                e[indices[j]] = static_cast<Float>(1);
-                solve(e, column);
+            // Restrict Z E to the removed states to obtain Z_JJ in one block solve.
+            MatrixType columns;
+            solve_multiple(basis, columns);
+            for (Index j = 0; j < r; ++j)
                 for (Index i = 0; i < r; ++i)
-                    block(i, j) = column[indices[i]];
-                e[indices[j]] = static_cast<Float>(0);
-            }
+                    block(i, j) = columns(indices[i], j);
             return block;
         }
 
         void solve_lu_block(MatrixType block, const VectorType &right_hand_side,
                             VectorType &solution) const {
-            auto factor = factorize_lu<Float, Index>(std::move(block));
+            auto factor = factorize_lu<Float>(std::move(block));
             if (factor.singular)
                 throw std::runtime_error("cut-time block is singular");
             lu_solve(factor, right_hand_side, solution);
@@ -555,9 +460,10 @@ class Subnetwork {
         void solve_cholesky_block(MatrixType block, std::span<const Index> indices,
                                   const VectorType &right_hand_side, VectorType &solution) const {
             const Index r = indices.size();
+            // Z_JJ = D_J (S^{-1})_JJ D_J^{-1}; recover the symmetric block by similarity.
             for (Index i = 0; i < r; ++i)
                 for (Index j = 0; j < r; ++j)
-                    block(i, j) /= weights[indices[i]] * weights[indices[j]];
+                    block(i, j) *= stationary_sqrt[indices[j]] / stationary_sqrt[indices[i]];
 
             auto factor = factorize_cholesky(block);
             if (!factor.success)
@@ -565,49 +471,22 @@ class Subnetwork {
 
             VectorType scaled_rhs(r);
             for (Index i = 0; i < r; ++i)
-                scaled_rhs[i] = right_hand_side[i] / weights[indices[i]];
+                scaled_rhs[i] = right_hand_side[i] / stationary_sqrt[indices[i]];
             cholesky_solve(factor, scaled_rhs, solution);
             for (Index i = 0; i < r; ++i)
-                solution[i] *= weights[indices[i]];
+                solution[i] *= stationary_sqrt[indices[i]];
         }
     };
 
     std::vector<State> states_;
-    std::unordered_map<State, int, StateHash<State>> index_;
+    std::unordered_map<State, Index, StateHash<State>> index_;
     SparseMatrixType R_;
     std::vector<Float> exit_rates_;
     std::vector<Index> boundary_states_;
     std::vector<BoundaryTransition<Index, State, Float>> boundary_;
-    std::vector<Float> stationary_weights_;
+    std::vector<Float> stationary_sqrt_;
 
-    std::unique_ptr<SolverImpl> solver_;
+    std::optional<SolverImpl> solver_;
 };
-
-// Explicit deduction guides
-template <typename State, typename SparseMatrixType, typename Index, typename Float>
-Subnetwork(std::vector<State>, SparseMatrixType,
-           std::vector<BoundaryTransition<Index, State, Float>>, std::vector<Float>)
-    -> Subnetwork<Float, Index, State>;
-
-template <typename State, typename SparseMatrixType, typename Index, typename Float>
-Subnetwork(std::vector<State>, SparseMatrixType,
-           std::vector<BoundaryTransition<Index, State, Float>>, std::vector<Float>,
-           std::vector<Index>) -> Subnetwork<Float, Index, State>;
-
-template <typename RestrictedGen>
-requires requires(RestrictedGen r) {
-    r.states;
-}
-Subnetwork(RestrictedGen &&) -> Subnetwork<
-    double, std::size_t,
-    typename std::decay_t<decltype(std::declval<RestrictedGen>().states)>::value_type>;
-
-template <typename ReversibleGen>
-requires requires(ReversibleGen r) {
-    r.restricted;
-}
-Subnetwork(ReversibleGen &&) -> Subnetwork<
-    double, std::size_t,
-    typename std::decay_t<decltype(std::declval<ReversibleGen>().restricted.states)>::value_type>;
 
 } // namespace else_sim

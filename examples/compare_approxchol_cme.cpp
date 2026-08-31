@@ -9,6 +9,10 @@
 
 class ApproxCholPreconditioner final {
   public:
+    using domain_type = num::Vector;
+    using codomain_type = num::Vector;
+    using math_propositions = num::math::type_list<num::axiom::positive_definite>;
+
     explicit ApproxCholPreconditioner(approxchol::CholeskyFactor<double> factor)
         : factor_(std::move(factor)), n_(factor_.order.size()), scratch_(n_, 0.0) {}
 
@@ -26,6 +30,11 @@ class ApproxCholPreconditioner final {
     approxchol::CholeskyFactor<double> factor_;
     num::idx n_;
     mutable std::vector<double> scratch_;
+};
+
+template <>
+struct num::math::model_of<ApproxCholPreconditioner> {
+    using laws = type_list<law::linear_map>;
 };
 
 int main() {
@@ -82,7 +91,7 @@ int main() {
         {
             num::Vector x_cg(n, 0.0);
             auto t0 = std::chrono::high_resolution_clock::now();
-            auto res = num::cg(a_dense, b, x_cg, 1e-8, 20000);
+            auto res = num::cg(A_op, b, x_cg, 1e-8, 20000);
             auto t1 = std::chrono::high_resolution_clock::now();
             double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
             std::cout << "  Unprecond CG   : " << std::fixed << std::setprecision(2) << ms

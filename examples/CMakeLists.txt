@@ -5,6 +5,9 @@ add_executable(else_oregonator else_oregonator.cpp)
 target_link_libraries(else_oregonator PRIVATE else markovkit::markovkit numerics::plot OpenMP::OpenMP_CXX)
 add_custom_target(ssa_vs_else_oregonator DEPENDS else_oregonator)
 
+add_executable(elsex_oregonator elsex_oregonator.cpp)
+target_link_libraries(elsex_oregonator PRIVATE elsex markovkit::markovkit numerics::plot OpenMP::OpenMP_CXX)
+
 add_executable(else_toggle_switch else_toggle_switch.cpp)
 target_link_libraries(else_toggle_switch PRIVATE else markovkit::markovkit numerics::plot)
 add_custom_target(ssa_vs_else_toggle_switch DEPENDS else_toggle_switch)
@@ -25,6 +28,9 @@ target_link_libraries(else_shedding_comparison PRIVATE else markovkit::markovkit
 if(TARGET numerics::io)
     add_executable(density_laplacian density_laplacian.cpp)
     target_link_libraries(density_laplacian PRIVATE else numerics::plot numerics::io OpenMP::OpenMP_CXX)
+
+    add_executable(elsex_density_laplacian elsex_density_laplacian.cpp)
+    target_link_libraries(elsex_density_laplacian PRIVATE elsex numerics::plot numerics::io OpenMP::OpenMP_CXX)
 
     add_executable(laplacian_trajectories laplacian_trajectories.cpp)
     target_link_libraries(laplacian_trajectories PRIVATE else markovkit::markovkit numerics::plot numerics::io)

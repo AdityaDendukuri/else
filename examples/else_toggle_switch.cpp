@@ -136,7 +136,7 @@ int main() {
         }
     }
 
-    // 3. Render 2-Row x 2-Column Multi-Regime Phase-Plane Comparison
+    // Plot the phase-plane comparison.
     std::cout << "3. Rendering 2x2 multi-trajectory phase plane plot...\n";
     num::plt::subplot(2, 2);
 
@@ -218,7 +218,7 @@ int main() {
     num::plt::savefig("toggle_trajectories.png");
     std::cout << "[SUCCESS] Saved toggle_trajectories.png\n\n";
 
-    // 4. Entrance Sharing Efficiency Experiment
+    // Measure how many entrance solves are shared across trajectories.
     std::cout << "4. Measuring trajectory entrance sharing across ensemble sizes...\n";
     const std::vector<std::size_t> test_counts = {10, 20, 50, 100, 250, 500, 1000};
     std::vector<double> traj_counts_dbl;

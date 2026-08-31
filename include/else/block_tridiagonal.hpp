@@ -17,6 +17,7 @@ template <typename Index = std::size_t, typename State, typename LevelFunction>
     for (std::size_t i = 0; i < states.size(); ++i)
         labels[i] = static_cast<long long>(level(states[i]));
 
+    // Compress arbitrary level labels into consecutive block indices.
     std::vector<long long> unique = labels;
     std::sort(unique.begin(), unique.end());
     unique.erase(std::unique(unique.begin(), unique.end()), unique.end());
@@ -32,16 +33,18 @@ template <typename Index = std::size_t, typename State, typename LevelFunction>
 
 template <typename Float = double, typename Index = std::size_t>
 struct BlockLUFactor {
+    // Diagonal entries are Schur factors; lower entries are block elimination multipliers.
     Index size = 0;
     std::vector<Index> offsets;
     std::vector<Index> order;
-    std::vector<LUFactor<Float, Index>> diagonal;
+    std::vector<LUFactor<Float>> diagonal;
     std::vector<Matrix<Float>> upper;
     std::vector<Matrix<Float>> lower;
 };
 
 template <typename Float = double, typename Index = std::size_t>
 struct BlockCholeskyFactor {
+    // A block bidiagonal Cholesky factor stored as diagonal and lower blocks.
     Index size = 0;
     std::vector<Index> offsets;
     std::vector<Index> order;
@@ -49,14 +52,38 @@ struct BlockCholeskyFactor {
     std::vector<Matrix<Float>> lower;
 };
 
-template <typename Factor, typename Index>
-[[nodiscard]] Index block_size(const Factor &factor, Index block) {
+template <typename Factor>
+[[nodiscard]] auto block_size(const Factor &factor, std::size_t block) {
     return factor.offsets[block + 1] - factor.offsets[block];
+}
+
+template <typename Float, typename Factor>
+[[nodiscard]] std::vector<Matrix<Float>> gather_block_rows(const Factor &factor,
+                                                           const Matrix<Float> &B) {
+    std::vector<Matrix<Float>> blocks(factor.diagonal.size());
+    for (std::size_t block = 0; block < factor.diagonal.size(); ++block) {
+        blocks[block] = Matrix<Float>(block_size(factor, block), B.cols());
+        for (std::size_t row = 0; row < block_size(factor, block); ++row)
+            for (std::size_t column = 0; column < B.cols(); ++column)
+                blocks[block](row, column) = B(factor.order[factor.offsets[block] + row], column);
+    }
+    return blocks;
+}
+
+template <typename Float, typename Factor>
+void scatter_block_rows(const Factor &factor, const std::vector<Matrix<Float>> &blocks,
+                        Matrix<Float> &X) {
+    X = Matrix<Float>(factor.size, blocks.front().cols());
+    for (std::size_t block = 0; block < factor.diagonal.size(); ++block)
+        for (std::size_t row = 0; row < block_size(factor, block); ++row)
+            for (std::size_t column = 0; column < X.cols(); ++column)
+                X(factor.order[factor.offsets[block] + row], column) = blocks[block](row, column);
 }
 
 template <typename Index>
 Index build_block_order(const std::vector<Index> &levels, std::vector<Index> &offsets,
                         std::vector<Index> &order, std::vector<Index> &inverse_order) {
+    // Group states by level while retaining maps to and from the original order.
     const Index blocks = *std::max_element(levels.begin(), levels.end()) + 1;
     offsets.assign(blocks + 1, 0);
     for (Index level : levels)
@@ -105,6 +132,7 @@ template <typename Float, typename Index>
 void scatter_lu_blocks(const SparseMatrix<Float, Index> &A, const std::vector<Index> &levels,
                        const std::vector<Index> &inverse_order, Float scale,
                        BlockLUFactor<Float, Index> &factor, std::vector<Matrix<Float>> &diagonal) {
+    // Copy sparse entries into the diagonal and two neighboring block bands.
     for (Index old_row = 0; old_row < factor.size; ++old_row) {
         const Index row_level = levels[old_row];
         const Index row = inverse_order[old_row] - factor.offsets[row_level];
@@ -131,26 +159,20 @@ void factor_lu_blocks(BlockLUFactor<Float, Index> &factor, std::vector<Matrix<Fl
     factor.diagonal.clear();
     factor.diagonal.reserve(diagonal.size());
     for (Index block = 0; block < diagonal.size(); ++block) {
+        // Eliminate the previous block, then factor the resulting Schur complement.
         Matrix<Float> schur = std::move(diagonal[block]);
         if (block > 0) {
             Matrix<Float> &lower = factor.lower[block - 1];
-            std::vector<Float> rhs(block_size(factor, block - 1)), solution;
-            for (Index row = 0; row < block_size(factor, block); ++row) {
-                for (Index col = 0; col < block_size(factor, block - 1); ++col)
-                    rhs[col] = lower(row, col);
-                lu_solve_transpose(factor.diagonal[block - 1], rhs, solution);
-                for (Index col = 0; col < block_size(factor, block - 1); ++col)
-                    lower(row, col) = solution[col];
-            }
+            // L_k <- C_k S_{k-1}^{-1}; each stored row is a right-hand side.
+            kernel::raw::lu_solve_right_multiple(lower.data(), factor.diagonal[block - 1].LU.data(),
+                                                 lower.rows(), lower.cols());
 
             const Matrix<Float> &upper = factor.upper[block - 1];
-            for (Index row = 0; row < block_size(factor, block); ++row)
-                for (Index q = 0; q < block_size(factor, block - 1); ++q)
-                    for (Index col = 0; col < block_size(factor, block); ++col)
-                        schur(row, col) -= lower(row, q) * upper(q, col);
+            kernel::raw::gemm_subtract(schur.data(), lower.data(), upper.data(), schur.rows(),
+                                       schur.cols(), lower.cols());
         }
 
-        auto diagonal_factor = factorize_lu<Float, Index>(std::move(schur));
+        auto diagonal_factor = factorize_lu<Float>(std::move(schur));
         if (diagonal_factor.singular)
             throw std::runtime_error("block Thomas Schur complement is singular");
         factor.diagonal.push_back(std::move(diagonal_factor));
@@ -176,12 +198,9 @@ template <typename Float = double, typename Index = std::size_t>
     return factor;
 }
 
-template <typename Float, typename Index>
+template <typename Float>
 void subtract_product(const Matrix<Float> &A, const Matrix<Float> &B, Matrix<Float> &C) {
-    for (Index row = 0; row < A.rows(); ++row)
-        for (Index col = 0; col < A.cols(); ++col)
-            for (Index rhs = 0; rhs < B.cols(); ++rhs)
-                C(row, rhs) -= A(row, col) * B(col, rhs);
+    kernel::raw::gemm_subtract(C.data(), A.data(), B.data(), A.rows(), B.cols(), A.cols());
 }
 
 template <typename Float, typename Index>
@@ -190,29 +209,21 @@ void block_solve(const BlockLUFactor<Float, Index> &factor, const Matrix<Float> 
     if (B.rows() != factor.size)
         throw std::invalid_argument("block Thomas right-hand side size mismatch");
 
-    const Index nrhs = B.cols();
-    std::vector<Matrix<Float>> y(factor.diagonal.size());
+    // Forward recurrence y_k = b_k - L_k y_{k-1}, then solve the Schur blocks backward.
+    std::vector<Matrix<Float>> y = gather_block_rows(factor, B);
     std::vector<Matrix<Float>> solution(factor.diagonal.size());
     for (Index block = 0; block < factor.diagonal.size(); ++block) {
-        y[block] = Matrix<Float>(block_size(factor, block), nrhs);
-        for (Index row = 0; row < block_size(factor, block); ++row)
-            for (Index rhs = 0; rhs < nrhs; ++rhs)
-                y[block](row, rhs) = B(factor.order[factor.offsets[block] + row], rhs);
         if (block > 0)
-            subtract_product<Float, Index>(factor.lower[block - 1], y[block - 1], y[block]);
+            subtract_product(factor.lower[block - 1], y[block - 1], y[block]);
     }
 
     for (Index block = static_cast<Index>(factor.diagonal.size()); block-- > 0;) {
         if (block + 1 < factor.diagonal.size())
-            subtract_product<Float, Index>(factor.upper[block], solution[block + 1], y[block]);
+            subtract_product(factor.upper[block], solution[block + 1], y[block]);
         lu_solve(factor.diagonal[block], y[block], solution[block]);
     }
 
-    X = Matrix<Float>(factor.size, nrhs);
-    for (Index block = 0; block < factor.diagonal.size(); ++block)
-        for (Index row = 0; row < block_size(factor, block); ++row)
-            for (Index rhs = 0; rhs < nrhs; ++rhs)
-                X(factor.order[factor.offsets[block] + row], rhs) = solution[block](row, rhs);
+    scatter_block_rows(factor, solution, X);
 }
 
 template <typename Float, typename Index>
@@ -247,6 +258,7 @@ void scatter_cholesky_blocks(const SparseMatrix<Float, Index> &A, const std::vec
                              const std::vector<Index> &inverse_order,
                              BlockCholeskyFactor<Float, Index> &factor,
                              std::vector<Matrix<Float>> &diagonal) {
+    // Store one triangle of the diagonal and lower block bands.
     for (Index old_row = 0; old_row < factor.size; ++old_row) {
         const Index row_level = levels[old_row];
         const Index row = inverse_order[old_row] - factor.offsets[row_level];
@@ -270,23 +282,19 @@ void factor_cholesky_blocks(BlockCholeskyFactor<Float, Index> &factor,
                             std::vector<Matrix<Float>> diagonal) {
     factor.diagonal.reserve(diagonal.size());
     for (Index block = 0; block < diagonal.size(); ++block) {
+        // Apply the previous block update, then factor the next diagonal block.
         Matrix<Float> schur = std::move(diagonal[block]);
         if (block > 0) {
             Matrix<Float> &lower = factor.lower[block - 1];
             const Matrix<Float> &previous = factor.diagonal[block - 1].L;
-            for (Index row = 0; row < lower.rows(); ++row)
-                for (Index col = 0; col < lower.cols(); ++col) {
-                    for (Index q = 0; q < col; ++q)
-                        lower(row, col) -= previous(col, q) * lower(row, q);
-                    lower(row, col) /= previous(col, col);
-                }
-            for (Index row = 0; row < lower.rows(); ++row)
-                for (Index col = 0; col <= row; ++col)
-                    for (Index q = 0; q < lower.cols(); ++q)
-                        schur(row, col) -= lower(row, q) * lower(col, q);
+            // L_k <- C_k L_{k-1}^{-T} before the symmetric Schur update.
+            kernel::raw::solve_right_lower_transpose_multiple(lower.data(), previous.data(),
+                                                              lower.rows(), lower.cols());
+            kernel::raw::syrk_lower_subtract(schur.data(), lower.data(), lower.rows(),
+                                             lower.cols());
         }
 
-        auto diagonal_factor = factorize_cholesky<Float, Index>(schur);
+        auto diagonal_factor = factorize_cholesky<Float>(schur);
         if (!diagonal_factor.success)
             throw std::runtime_error("block Cholesky Schur complement is not positive definite");
         factor.diagonal.push_back(std::move(diagonal_factor));
@@ -311,34 +319,10 @@ factorize_block_cholesky(const SparseMatrix<Float, Index> &A, const std::vector<
     return factor;
 }
 
-template <typename Float, typename Index>
-void solve_lower(const Matrix<Float> &L, Matrix<Float> &X) {
-    for (Index row = 0; row < L.rows(); ++row) {
-        for (Index col = 0; col < row; ++col)
-            for (Index rhs = 0; rhs < X.cols(); ++rhs)
-                X(row, rhs) -= L(row, col) * X(col, rhs);
-        for (Index rhs = 0; rhs < X.cols(); ++rhs)
-            X(row, rhs) /= L(row, row);
-    }
-}
-
-template <typename Float, typename Index>
-void solve_upper(const Matrix<Float> &L, Matrix<Float> &X) {
-    for (Index row = static_cast<Index>(L.rows()); row-- > 0;) {
-        for (Index col = row + 1; col < L.rows(); ++col)
-            for (Index rhs = 0; rhs < X.cols(); ++rhs)
-                X(row, rhs) -= L(col, row) * X(col, rhs);
-        for (Index rhs = 0; rhs < X.cols(); ++rhs)
-            X(row, rhs) /= L(row, row);
-    }
-}
-
-template <typename Float, typename Index>
+template <typename Float>
 void subtract_transpose_product(const Matrix<Float> &A, const Matrix<Float> &B, Matrix<Float> &C) {
-    for (Index row = 0; row < A.cols(); ++row)
-        for (Index col = 0; col < A.rows(); ++col)
-            for (Index rhs = 0; rhs < B.cols(); ++rhs)
-                C(row, rhs) -= A(col, row) * B(col, rhs);
+    kernel::raw::gemm_transpose_left_subtract(C.data(), A.data(), B.data(), A.rows(), A.cols(),
+                                              B.cols());
 }
 
 template <typename Float, typename Index>
@@ -347,31 +331,25 @@ void block_solve(const BlockCholeskyFactor<Float, Index> &factor, const Matrix<F
     if (B.rows() != factor.size)
         throw std::invalid_argument("block Cholesky right-hand side size mismatch");
 
-    const Index nrhs = B.cols();
-    std::vector<Matrix<Float>> y(factor.diagonal.size());
+    // Forward substitution through the block bidiagonal factor, then through its transpose.
+    std::vector<Matrix<Float>> y = gather_block_rows(factor, B);
     std::vector<Matrix<Float>> x(factor.diagonal.size());
     for (Index block = 0; block < factor.diagonal.size(); ++block) {
-        y[block] = Matrix<Float>(block_size(factor, block), nrhs);
-        for (Index row = 0; row < block_size(factor, block); ++row)
-            for (Index rhs = 0; rhs < nrhs; ++rhs)
-                y[block](row, rhs) = B(factor.order[factor.offsets[block] + row], rhs);
         if (block > 0)
-            subtract_product<Float, Index>(factor.lower[block - 1], y[block - 1], y[block]);
-        solve_lower<Float, Index>(factor.diagonal[block].L, y[block]);
+            subtract_product(factor.lower[block - 1], y[block - 1], y[block]);
+        kernel::raw::solve_lower_multiple(y[block].data(), factor.diagonal[block].L.data(),
+                                          y[block].rows(), y[block].cols());
     }
 
     for (Index block = static_cast<Index>(factor.diagonal.size()); block-- > 0;) {
         x[block] = std::move(y[block]);
         if (block + 1 < factor.diagonal.size())
-            subtract_transpose_product<Float, Index>(factor.lower[block], x[block + 1], x[block]);
-        solve_upper<Float, Index>(factor.diagonal[block].L, x[block]);
+            subtract_transpose_product(factor.lower[block], x[block + 1], x[block]);
+        kernel::raw::solve_lower_transpose_multiple(
+            x[block].data(), factor.diagonal[block].L.data(), x[block].rows(), x[block].cols());
     }
 
-    X = Matrix<Float>(factor.size, nrhs);
-    for (Index block = 0; block < factor.diagonal.size(); ++block)
-        for (Index row = 0; row < block_size(factor, block); ++row)
-            for (Index rhs = 0; rhs < nrhs; ++rhs)
-                X(factor.order[factor.offsets[block] + row], rhs) = x[block](row, rhs);
+    scatter_block_rows(factor, x, X);
 }
 
 template <typename Float, typename Index>
