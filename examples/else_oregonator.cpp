@@ -1,4 +1,7 @@
-#include "markovkit.hpp"
+#include "else/algorithms/ensemble.hpp"
+#include "markovkit/reaction_system.hpp"
+#include "markovkit/trajectory.hpp"
+#include "ssa/ssa.hpp"
 #include <array>
 #include <chrono>
 #include <iostream>
@@ -7,7 +10,7 @@
 
 namespace {
 
-constexpr std::size_t simulation_steps = 100000;
+constexpr num::idx simulation_steps = 100000;
 constexpr num::idx subnetwork_capacity = 60;
 constexpr double final_time = std::numeric_limits<double>::infinity();
 constexpr std::array<const char *, 3> labels = {"X", "Y", "Z"};
@@ -22,7 +25,7 @@ int main() {
     const double y3 = 2000.0;
     const double mu1 = 2000.0;
     const double mu2 = 50000.0;
-    const std::vector<double> rates = {
+    const num::array<double> rates = {
         mu1 / y2, mu2 / (y1 * y2), (mu1 + mu2) / y1, 2.0 * mu1 / (y1 * y1), (mu1 + mu2) / y3,
     };
 
@@ -40,26 +43,26 @@ int main() {
         }};
 
     const markovkit::State initial{500, 1000, 2000};
+    const else_sim::EnsembleOptions options{.capacity = subnetwork_capacity,
+                                            .maximum_steps = simulation_steps};
     // Oregonator reactions change total copy number by 0 or 2, so total/2
     // gives adjacent block levels while spreading an ensemble over more blocks.
     const auto block_level = [](const markovkit::State &x) { return (x[0] + x[1] + x[2]) / 2; };
     // Compare matched ELSE and SSA trajectory ensembles.
     const auto t_start = std::chrono::high_resolution_clock::now();
-    const auto one_else = else_sim::else_ensemble(
-        model, rates, initial, 1, 0.0, final_time,
-        {.capacity = subnetwork_capacity, .maximum_steps = simulation_steps}, 42, block_level);
+    const auto one_else = else_sim::else_ensemble(model, rates, initial, 1, 0.0, final_time,
+                                                  options, 42, block_level);
     const auto t_one = std::chrono::high_resolution_clock::now();
-    const std::vector<markovkit::Trajectory> one_ssa{
+    const num::array<markovkit::Trajectory> one_ssa{
         ssa::gillespie(model, rates, initial, 0.0, final_time, 42, simulation_steps)};
-    const auto many_else = else_sim::else_ensemble(
-        model, rates, initial, 20, 0.0, final_time,
-        {.capacity = subnetwork_capacity, .maximum_steps = simulation_steps}, 42, block_level);
+    const auto many_else = else_sim::else_ensemble(model, rates, initial, 20, 0.0, final_time,
+                                                   options, 42, block_level);
     const auto t_many = std::chrono::high_resolution_clock::now();
     std::cout << "legacy ELSE timing: one="
               << std::chrono::duration<double, std::milli>(t_one - t_start).count()
-              << " ms, twenty="
-              << std::chrono::duration<double, std::milli>(t_many - t_one).count() << " ms\n";
-    std::vector<markovkit::Trajectory> many_ssa(20);
+              << " ms, twenty=" << std::chrono::duration<double, std::milli>(t_many - t_one).count()
+              << " ms\n";
+    num::array<markovkit::Trajectory> many_ssa(20);
 // Use matching seed ranges for the SSA ensemble with OpenMP parallelism.
 #pragma omp parallel for schedule(dynamic)
     for (int i = 0; i < 20; ++i) {

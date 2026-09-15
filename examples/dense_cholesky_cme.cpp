@@ -1,7 +1,8 @@
-#include "else/restriction.hpp"
-#include "markovkit.hpp"
+#include "else/restriction/restriction.hpp"
+#include "markovkit/reaction_system.hpp"
 #include <cmath>
 #include <numeric>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -19,30 +20,31 @@ int main() {
                 return rates[1] * state[0];
             },
         }};
-    const std::vector<double> rates{birth_rate, death_rate};
+    const num::array<double> rates{birth_rate, death_rate};
 
-    std::vector<markovkit::State> states;
+    num::array<markovkit::State> states;
     // The finite restriction contains molecule counts from zero to n-1.
     for (num::idx state = 0; state < n; ++state) {
         states.push_back(markovkit::State{static_cast<int>(state)});
     }
 
     // The full immigration-death CME has Poisson stationary weights.
-    std::vector<double> h(n, 1.0);
+    num::array<double> h(n, 1.0);
     for (num::idx state = 1; state < n; ++state) {
         h[state] = h[state - 1] * std::sqrt(birth_rate / (death_rate * state));
     }
 
     // Use reversibility to select the Cholesky solve path.
-    auto subnetwork = else_sim::reversible_cme_subnetwork(model, rates, states, h);
-    num::Vector source(n, 0.0);
+    auto subnetwork =
+        else_sim::reversible_restriction(model, rates, states, num::view<const double>(h));
+    num::vec source(n, 0.0);
     source[0] = 1.0;
     // Occupation measures expected time spent in each state before exit.
-    const auto time_spent = subnetwork.occupation(source);
+    const auto time_spent = else_sim::solve_transpose(subnetwork, source);
 
     auto count = num::linspace(0.0, static_cast<double>(n - 1), n);
-    std::vector<double> occupation = time_spent;
-    std::vector<double> stationary(n);
+    num::array<double> occupation(time_spent.begin(), time_spent.end());
+    num::array<double> stationary(n);
     for (num::idx state = 0; state < n; ++state) {
         stationary[state] = h[state] * h[state];
     }

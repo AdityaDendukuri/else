@@ -6,7 +6,7 @@ A modern, high-performance, header-only C++20 template library for Exact Low-Ran
 
 - **Subnetwork Inversion & Moments**: Reusable $\mathcal{O}(n^3)$ base factorizations (LU / Cholesky) evaluated across arbitrary right-hand side ensembles in $\mathcal{O}(k \cdot n^2)$ with zero refactoring.
 - **Woodbury State Shedding**: Exact block cut-time losses $\ell_S = q_S^\top Z_{SS}^{-1} u_S$ computed in $\mathcal{O}(|S|^3 + |S| n^2)$.
-- **Floating-Point Error & Precision Certification**: Linear backward residual tracking $\varepsilon_{\text{res}} = \|Z_{SS} c - u_S\|_\infty / \|u_S\|_\infty$ and lightweight `safe_add` error accumulation with automatic certified naive fallback.
+- **Floating-plot_point Error & Precision Certification**: Linear backward residual tracking $\varepsilon_{\text{res}} = \|Z_{SS} c - u_S\|_\infty / \|u_S\|_\infty$ and lightweight `safe_add` error accumulation with automatic certified naive fallback.
 - **Laplace Density Propagation**: Modified Talbot complex contour integration for transient probability densities.
 
 ## Quick Start
@@ -33,6 +33,8 @@ cmake --build .
 ctest --output-on-failure
 ```
 
-The library, tests, and benchmark have no external dependencies. Examples use
-the adjacent Markovkit and Numerics repositories and are enabled with
+The library is header-only and builds on the adjacent Numerics repository
+(`../numerics`), which supplies its containers (`num::vec`, `num::mat`,
+`num::spmat`), factorizations, and solvers. Benchmarks and examples also use the
+adjacent Markovkit repository (`../markovkit`); examples are enabled with
 `-DELSE_BUILD_EXAMPLES=ON`.

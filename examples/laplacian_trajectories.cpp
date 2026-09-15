@@ -1,8 +1,14 @@
+#include "container/util/math.hpp"
 #include "io/json.hpp"
 #include "io/sparse_json.hpp"
-#include "markovkit.hpp"
+#include "laplacian_validation.hpp"
+#include "plot/plot.hpp"
+#include "stats/selection.hpp"
 #include <array>
 #include <cmath>
+#include <iostream>
+#include <span>
+#include <string>
 #include <vector>
 
 int main() {
@@ -11,60 +17,57 @@ int main() {
     const auto laplacian = num::io::sparse_matrix(data.at("L"));
     const auto h = num::io::json_vector<double>(data.at("h"));
     const auto committors = num::io::json_matrix<double>(data.at("C"));
-    const cme::ReversibleLaplacian generator(laplacian, h);
-
-    constexpr std::size_t count = 5;
-    constexpr std::size_t samples = 20;
+    constexpr num::idx count = 5;
+    constexpr num::idx samples = 1000;
+    constexpr num::idx reference_samples = 5000;
+    constexpr num::idx capacity = 60;
     std::array<num::idx, count> starts{};
     // Start each ensemble at its dominant committor state.
-    for (std::size_t observable = 0; observable < count; ++observable) {
+    for (num::idx observable = 0; observable < count; ++observable) {
         starts[observable] = num::argmax(
             laplacian.n_rows(), [&](num::idx state) { return committors[state][observable]; });
     }
 
     // Observe each path on a logarithmic time grid.
-    const auto times = num::logspace(-12.0, -4.0, 41);
+    const auto times = num::logspace(-12.0, -5.0, 29);
 
-    std::array<std::array<std::vector<double>, count>, count> curves;
-    for (std::size_t panel = 0; panel < count; ++panel) {
-        for (auto &curve : curves[panel]) {
-            curve.assign(times.size(), 0.0);
-        }
-
-        for (std::size_t sample = 0; sample < samples; ++sample) {
-            // Sample one trajectory through local Laplacian restrictions.
-            const auto path = else_sim::laplacian_else_trajectory(
-                generator, starts[panel], 0.0, times.back(), {.capacity = 60},
-                static_cast<int>((1000 * panel) + sample));
-
-            // Accumulate committors at the requested observation times.
-            const auto state_indices = markovkit::trajectory_indices_at(path, times);
-            for (std::size_t time_index = 0; time_index < times.size(); ++time_index) {
-                const auto state = static_cast<num::idx>(path.states[state_indices[time_index]][0]);
-                for (std::size_t observable = 0; observable < count; ++observable) {
-                    curves[panel][observable][time_index] +=
-                        committors[state][observable] / static_cast<double>(samples);
-                }
-            }
-        }
+    std::array<laplacian_validation::Curves, count> curves;
+    std::array<laplacian_validation::Curves, count> reference;
+    std::array<double, count> discrepancies{};
+#pragma omp parallel for schedule(dynamic)
+    for (num::idx panel = 0; panel < count; ++panel) {
+        curves[panel] = laplacian_validation::labeled_subsweep_committor_means(
+            laplacian, num::view<const double>(h), committors, starts[panel],
+            num::view<const double>(times), samples, 20000 + static_cast<unsigned>(panel),
+            capacity);
+        reference[panel] = laplacian_validation::ssa_committor_means(
+            laplacian, num::view<const double>(h), committors, starts[panel],
+            num::view<const double>(times), reference_samples,
+            30000 + static_cast<unsigned>(panel));
+        discrepancies[panel] =
+            laplacian_validation::maximum_discrepancy(curves[panel], reference[panel]);
     }
 
-    // Each panel shows ensemble-averaged committors from one basin.
-    num::plt::subplot(2, 3);
-    for (std::size_t panel = 0; panel < count; ++panel) {
-        for (std::size_t observable = 0; observable < count; ++observable) {
+    num::plt::subplot(1, 5);
+    for (num::idx panel = 0; panel < count; ++panel) {
+        for (num::idx observable = 0; observable < count; ++observable) {
+            const std::string color = std::to_string(observable + 1);
             num::plt::plot(times, curves[panel][observable], "C" + std::to_string(observable + 1),
-                           "linespoints lw 2 pt 7 ps 0.35");
+                           "lines lw 2 lc " + color);
+            num::plt::plot(times, reference[panel][observable], std::string{},
+                           "lines dt 2 lw 1.2 lc " + color);
         }
-        num::plt::title("start = argmax(C" + std::to_string(panel + 1) + ")");
-        num::plt::xlabel("t");
-        num::plt::ylabel("mean C^T p(t)");
+        num::plt::title("start in basin " + std::to_string(panel + 1));
+        num::plt::xlabel("time");
+        num::plt::ylabel("empirical committor mean");
         num::plt::semilogx();
         num::plt::ylim(-0.02, 1.02);
-        if (panel == 0) {
-            num::plt::legend();
-        }
+        if (panel == 0)
+            num::plt::legend("bottom left");
         num::plt::next();
     }
     num::plt::savefig("laplacian_trajectories.png");
+    for (num::idx panel = 0; panel < count; ++panel)
+        std::cout << "basin " << panel + 1 << " maximum discrepancy = " << discrepancies[panel]
+                  << '\n';
 }

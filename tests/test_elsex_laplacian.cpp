@@ -9,8 +9,8 @@
 
 #include "check.hpp"
 
-#include "elsex/laplacian.hpp"
-#include "elsex/shedding.hpp"
+#include "else/quantities/shedding.hpp"
+#include "else/restriction/laplacian.hpp"
 
 #include "container/matrix_expr.hpp"
 #include "linear/factorization/lu.hpp"
@@ -24,7 +24,7 @@
 
 namespace {
 
-using State = std::vector<int>;
+using State = num::multi_index;
 using num::idx;
 using num::real;
 
@@ -32,10 +32,10 @@ constexpr idx graph_size = 12;
 
 /// Path graph Laplacian with unequal edge weights, grounded at both ends so a
 /// restriction has somewhere to escape to.
-num::SparseMatrix path_laplacian() {
-    std::vector<idx> rows, cols;
-    std::vector<real> values;
-    std::vector<real> degree(graph_size, 0.0);
+num::spmat path_laplacian() {
+    num::array<idx> rows, cols;
+    num::array<real> values;
+    num::array<real> degree(graph_size, 0.0);
 
     for (idx i = 0; i + 1 < graph_size; ++i) {
         const real weight = 0.5 + 0.25 * static_cast<real>(i % 3);
@@ -53,15 +53,17 @@ num::SparseMatrix path_laplacian() {
         cols.push_back(i);
         values.push_back(degree[i]);
     }
-    return num::SparseMatrix::from_triplets(graph_size, graph_size, rows, cols, values);
+    return num::spmat::from_triplets(graph_size, graph_size, rows, cols, values);
 }
 
 /// Uniform h makes L h = 0, so the unrestricted chain is conservative.
-std::vector<real> uniform_weights() { return std::vector<real>(graph_size, 1.0); }
+num::array<real> uniform_weights() {
+    return num::array<real>(graph_size, 1.0);
+}
 
 /// Non-uniform positive weights, to exercise the similarity scaling.
-std::vector<real> graded_weights() {
-    std::vector<real> h(graph_size, 0.0);
+num::array<real> graded_weights() {
+    num::array<real> h(graph_size, 0.0);
     for (idx i = 0; i < graph_size; ++i) {
         h[i] = std::sqrt(1.0 + 0.4 * static_cast<real>(i));
     }
@@ -74,15 +76,14 @@ void test_neighborhood_is_connected_and_ordered() {
     const auto laplacian = path_laplacian();
     const auto h = graded_weights();
 
-    const auto window =
-        elsex::laplacian_neighborhood(laplacian, std::span<const real>(h), 5, 5);
+    const auto window = else_sim::laplacian_neighborhood(laplacian, num::view<const real>(h), 5, 5);
     check::that(window.size() == 5, "the neighborhood reaches the requested capacity");
     check::that(window.front() == 5, "the origin comes first");
 
     // On a path graph the neighborhood must be a contiguous run containing 5.
-    std::vector<idx> sorted = window;
+    num::array<idx> sorted = window;
     std::sort(sorted.begin(), sorted.end());
-    for (std::size_t k = 1; k < sorted.size(); ++k) {
+    for (num::idx k = 1; k < sorted.size(); ++k) {
         check::that(sorted[k] == sorted[k - 1] + 1, "the neighborhood is contiguous");
     }
     check::that(sorted.front() <= 5 && 5 <= sorted.back(), "the origin is inside the run");
@@ -96,20 +97,20 @@ void test_similarity_satisfies_detailed_balance() {
     const auto laplacian = path_laplacian();
     const auto h = graded_weights();
 
-    std::vector<idx> window;
+    num::array<idx> window;
     for (idx i = 2; i < 10; ++i) {
         window.push_back(i);
     }
     const auto subnetwork =
-        elsex::laplacian_subnetwork(laplacian, std::span<const real>(h), window);
+        else_sim::laplacian_subnetwork(laplacian, num::view<const real>(h), window);
 
-    check::that(subnetwork.is_reversible(), "the subnetwork carries stationary weights");
-    const auto stationary = subnetwork.stationary();
-    const num::Matrix generator = num::dense(subnetwork.generator());
+    check::that(else_sim::is_reversible(subnetwork), "the subnetwork carries stationary weights");
+    const auto &stationary = subnetwork.stationary;
+    const num::mat generator = num::dense(subnetwork.generator);
 
-    for (idx a = 0; a < subnetwork.size(); ++a) {
+    for (idx a = 0; a < else_sim::size(subnetwork); ++a) {
         check::close(stationary[a], h[window[a]] * h[window[a]], "stationary weight is h^2");
-        for (idx b = 0; b < subnetwork.size(); ++b) {
+        for (idx b = 0; b < else_sim::size(subnetwork); ++b) {
             if (a == b) {
                 continue;
             }
@@ -124,24 +125,24 @@ void test_escape_only_at_the_window_edges() {
     const auto laplacian = path_laplacian();
     const auto h = uniform_weights();
 
-    std::vector<idx> window;
+    num::array<idx> window;
     for (idx i = 4; i < 8; ++i) {
         window.push_back(i);
     }
     const auto subnetwork =
-        elsex::laplacian_subnetwork(laplacian, std::span<const real>(h), window);
+        else_sim::laplacian_subnetwork(laplacian, num::view<const real>(h), window);
 
-    check::that(subnetwork.escape_states().size() == 2, "only the two edges escape");
-    check::that(subnetwork.escape_states()[0] == 0, "the lower edge escapes");
-    check::that(subnetwork.escape_states()[1] == 3, "the upper edge escapes");
+    check::that(subnetwork.escape_states.size() == 2, "only the two edges escape");
+    check::that(subnetwork.escape_states[0] == 0, "the lower edge escapes");
+    check::that(subnetwork.escape_states[1] == 3, "the upper edge escapes");
 
     // The first-exit law must still normalize.
-    const std::vector<idx> entrances{0, 1, 2, 3};
-    const auto law = elsex::entrance_law(subnetwork, std::span<const idx>(entrances));
-    const auto rates = subnetwork.escape_rates();
+    const num::array<idx> entrances{0, 1, 2, 3};
+    const auto law = else_sim::entrance_law(subnetwork, num::view<const idx>(entrances));
+    const auto &rates = subnetwork.escape_rates;
     for (idx k = 0; k < entrances.size(); ++k) {
         real total = 0.0;
-        for (idx j = 0; j < subnetwork.size(); ++j) {
+        for (idx j = 0; j < else_sim::size(subnetwork); ++j) {
             total += rates[j] * law.occupation(k, j);
         }
         check::close(total, 1.0, "sum_j w_j Z_ij = 1 on a Laplacian restriction", 1e-12);
@@ -153,65 +154,69 @@ void test_restrictions_chain_outward() {
     const auto laplacian = path_laplacian();
     const auto h = uniform_weights();
 
-    const auto chain =
-        elsex::laplacian_restrictions(laplacian, std::span<const real>(h), 6, 3, 4);
-    check::that(chain.size() >= 2, "the chain has several links");
+    for (const auto resampling : {else_sim::DensityResampling::WeightedSupport,
+                                  else_sim::DensityResampling::MultinomialParticles}) {
+        const auto chain = else_sim::laplacian_restrictions(laplacian, num::view<const real>(h), 6,
+                                                            3, 4, 42, resampling, 3);
+        check::that(chain.size() >= 2, "the chain has several links");
 
-    // Each link must hand its boundary to the next.
-    for (std::size_t r = 0; r + 1 < chain.size(); ++r) {
-        bool handed_over = false;
-        for (const auto &transition : chain[r].boundary()) {
-            if (chain[r + 1].find(transition.destination) < chain[r + 1].size()) {
-                handed_over = true;
+        // Each link must hand its boundary to the next.
+        for (num::idx r = 0; r + 1 < chain.size(); ++r) {
+            bool handed_over = false;
+            for (const auto &transition : chain[r].boundary) {
+                if (else_sim::find(chain[r + 1], transition.destination) <
+                    else_sim::size(chain[r + 1])) {
+                    handed_over = true;
+                }
             }
+            check::that(handed_over, "each link's boundary reaches the next link");
         }
-        check::that(handed_over, "each link's boundary reaches the next link");
     }
-    check::done("successive restrictions chain outward");
+    check::done("both density-resampling policies chain restrictions outward");
 }
 
 void test_joint_cut_time_matches_its_definition() {
     const auto laplacian = path_laplacian();
     const auto h = graded_weights();
 
-    std::vector<idx> window;
+    num::array<idx> window;
     for (idx i = 1; i < 11; ++i) {
         window.push_back(i);
     }
     const auto subnetwork =
-        elsex::laplacian_subnetwork(laplacian, std::span<const real>(h), window);
+        else_sim::laplacian_subnetwork(laplacian, num::view<const real>(h), window);
 
-    num::Vector mixture(subnetwork.size(), 0.0);
+    num::vec mixture(else_sim::size(subnetwork), 0.0);
     mixture[1] = 0.7;
     mixture[6] = 0.3;
-    const auto state = elsex::shedding_state(subnetwork, mixture);
+    const auto state = else_sim::shedding_state(subnetwork, mixture);
 
     real full = 0.0;
-    for (idx i = 0; i < subnetwork.size(); ++i) {
+    for (idx i = 0; i < else_sim::size(subnetwork); ++i) {
         full += mixture[i] * state.exit_time[i];
     }
 
-    const num::Matrix operator_matrix = num::dense(subnetwork.operator_matrix());
-    const auto reduced_cut_time = [&](std::span<const idx> removed) {
-        std::vector<bool> drop(subnetwork.size(), false);
+    const num::mat operator_matrix = num::dense(subnetwork.operator_matrix);
+    const auto reduced_cut_time = [&](num::view<const idx> removed) {
+        num::array<bool> drop(else_sim::size(subnetwork), false);
         for (idx j : removed) {
             drop[j] = true;
         }
-        std::vector<idx> kept;
-        for (idx j = 0; j < subnetwork.size(); ++j) {
+        num::array<idx> kept;
+        for (idx j = 0; j < else_sim::size(subnetwork); ++j) {
             if (!drop[j]) {
                 kept.push_back(j);
             }
         }
-        num::Matrix block(kept.size(), kept.size(), 0.0);
+        num::mat block(kept.size(), kept.size(), 0.0);
         for (idx a = 0; a < kept.size(); ++a) {
             for (idx b = 0; b < kept.size(); ++b) {
                 block(a, b) = operator_matrix(kept[a], kept[b]);
             }
         }
         const auto factor = num::lu(num::make_square(block));
-        num::Vector ones(kept.size(), 1.0);
-        num::Vector exit_time(kept.size(), 0.0);
+        num::vec ones(kept.size(), 1.0);
+        num::vec exit_time(kept.size(), 0.0);
         num::lu_solve(factor, ones, exit_time);
 
         real total = 0.0;
@@ -222,29 +227,30 @@ void test_joint_cut_time_matches_its_definition() {
     };
 
     // Sets that avoid the entrances, since the lemma requires rho_J = 0.
-    const std::vector<std::vector<idx>> blocks{{3}, {3, 4}, {2, 5, 8}, {0, 3, 4, 7, 9}};
+    const num::array<num::array<idx>> blocks{{3}, {3, 4}, {2, 5, 8}, {0, 3, 4, 7, 9}};
     for (const auto &removed : blocks) {
         const auto joint =
-            elsex::joint_cut_time_loss(subnetwork, state, std::span<const idx>(removed));
-        const real expected = full - reduced_cut_time(std::span<const idx>(removed));
+            else_sim::joint_cut_time_loss(subnetwork, state, num::view<const idx>(removed));
+        const real expected = full - reduced_cut_time(num::view<const idx>(removed));
         check::close(joint.loss, expected, "joint loss equals the time actually lost", 1e-10);
         check::that(joint.backward_residual < 1e-10, "the block solve is well conditioned");
     }
 
     // One removed state must agree with the single-state rule.
-    const auto marginal = elsex::exact_cut_time_losses(subnetwork, state);
-    const std::vector<idx> single{3};
-    const auto joint = elsex::joint_cut_time_loss(subnetwork, state, std::span<const idx>(single));
+    const auto marginal = else_sim::exact_cut_time_losses(subnetwork, state);
+    const num::array<idx> single{3};
+    const auto joint =
+        else_sim::joint_cut_time_loss(subnetwork, state, num::view<const idx>(single));
     check::close(joint.loss, marginal[3], "joint reduces to the single-state rule", 1e-11);
     check::done("joint cut-time loss equals the time actually lost");
 }
 
 int main() {
-    std::printf("elsex laplacian\n");
+    std::printf("else laplacian\n");
     test_neighborhood_is_connected_and_ordered();
     test_similarity_satisfies_detailed_balance();
     test_escape_only_at_the_window_edges();
     test_restrictions_chain_outward();
     test_joint_cut_time_matches_its_definition();
-    return check::report("elsex laplacian");
+    return check::report("else laplacian");
 }

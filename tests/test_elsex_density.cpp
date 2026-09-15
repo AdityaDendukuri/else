@@ -9,8 +9,8 @@
 
 #include "check.hpp"
 
-#include "elsex/density.hpp"
-#include "elsex/restriction.hpp"
+#include "else/algorithms/density.hpp"
+#include "else/restriction/restriction.hpp"
 
 #include "linear/expv/expv.hpp"
 #include "linear/matrix_utils.hpp"
@@ -18,12 +18,14 @@
 
 #include <cmath>
 #include <functional>
+#include <random>
+#include <unordered_map>
 #include <vector>
 
 namespace {
 
-using State = std::vector<int>;
-using Rates = std::vector<num::real>;
+using State = num::multi_index;
+using Rates = num::array<num::real>;
 using num::idx;
 using num::real;
 
@@ -35,8 +37,8 @@ constexpr real horizon = 0.6;
 /// Birth-death on 0..capacity_states-1 with reflecting ends, so the space is
 /// closed and no probability escapes it.
 struct System {
-    std::vector<std::vector<int>> changes;
-    std::vector<std::function<real(const State &, const Rates &, real)>> propensities;
+    num::array<num::array<int>> changes;
+    num::array<std::function<real(const State &, const Rates &, real)>> propensities;
 
     [[nodiscard]] real total_propensity(const State &state, const Rates &rates, real time) const {
         real total = 0.0;
@@ -59,8 +61,8 @@ System closed_chain() {
     return model;
 }
 
-std::vector<State> all_states() {
-    std::vector<State> states;
+num::array<State> all_states() {
+    num::array<State> states;
     for (int copies = 0; copies < capacity_states; ++copies) {
         states.push_back(State{copies});
     }
@@ -68,19 +70,19 @@ std::vector<State> all_states() {
 }
 
 /// Row `start` of exp(R t) for the full closed generator.
-std::vector<real> reference_density(real time, idx start) {
+num::array<real> reference_density(real time, idx start) {
     const auto model = closed_chain();
     const Rates rates{birth, death};
-    const auto subnetwork = elsex::restriction(model, rates, all_states());
+    const auto subnetwork = else_sim::restriction(model, rates, all_states());
 
     // p^T = p0^T exp(Rt), and (exp(R^T t) delta_start)_j = (exp(Rt))_{start,j},
     // so a transpose exponential-vector product gives the row directly.
-    num::Vector initial(capacity_states, 0.0);
+    num::vec initial(capacity_states, 0.0);
     initial[start] = 1.0;
-    const num::Vector propagated =
-        num::expv(time, num::transpose(subnetwork.generator()), initial, 30, 1e-12);
+    const num::vec propagated =
+        num::expv(time, num::transpose(subnetwork.generator), initial, 30, 1e-12);
 
-    std::vector<real> density(capacity_states, 0.0);
+    num::array<real> density(capacity_states, 0.0);
     for (idx j = 0; j < static_cast<idx>(capacity_states); ++j) {
         density[j] = propagated[j];
     }
@@ -88,10 +90,10 @@ std::vector<real> reference_density(real time, idx start) {
 }
 
 /// Total variation between an ELSE solution and the reference, over all states.
-real total_variation(const elsex::DensitySolution<State> &solution,
-                     const std::vector<real> &reference) {
-    std::vector<real> aligned(capacity_states, 0.0);
-    for (std::size_t k = 0; k < solution.states.size(); ++k) {
+real total_variation(const else_sim::DensitySolution<State> &solution,
+                     const num::array<real> &reference) {
+    num::array<real> aligned(capacity_states, 0.0);
+    for (num::idx k = 0; k < solution.states.size(); ++k) {
         aligned[static_cast<idx>(solution.states[k][0])] = solution.probability[k];
     }
     real distance = 0.0;
@@ -109,15 +111,15 @@ void test_single_subnetwork_reproduces_the_matrix_exponential() {
 
     // The whole space in one subnetwork: no boundary, so the composition is a
     // single resolvent and its inversion must be exp(R t).
-    std::vector<elsex::Subnetwork<State>> chain;
-    chain.push_back(elsex::restriction(model, rates, all_states()));
-    check::that(chain.front().boundary().empty(), "a closed space has no boundary");
+    num::array<else_sim::Subnetwork<State>> chain;
+    chain.push_back(else_sim::restriction(model, rates, all_states()));
+    check::that(chain.front().boundary.empty(), "a closed space has no boundary");
 
-    auto density = elsex::make_density_chain(std::move(chain));
-    const auto solution = elsex::inverse_laplace_density(density, State{0}, horizon, 24);
+    auto density = else_sim::make_density_chain(std::move(chain));
+    const auto solution = else_sim::inverse_laplace_density(density, State{0}, horizon, 24);
     const auto reference = reference_density(horizon, 0);
 
-    for (std::size_t k = 0; k < solution.states.size(); ++k) {
+    for (num::idx k = 0; k < solution.states.size(); ++k) {
         const idx j = static_cast<idx>(solution.states[k][0]);
         check::close(solution.probability[k], reference[j], "Talbot inversion equals exp(Rt)",
                      1e-8);
@@ -130,14 +132,14 @@ void test_composition_converges_to_the_matrix_exponential() {
     const Rates rates{birth, death};
     const auto reference = reference_density(horizon, 0);
 
-    elsex::EnsembleOptions options;
+    else_sim::EnsembleOptions options;
     options.capacity = 64; // no shedding; truncation is the chain length alone
     options.expansion_depth = 1;
 
     const auto distance_after = [&](int steps) {
-        auto chain = elsex::density_subnetworks(model, rates, State{0}, steps, options);
-        auto density = elsex::make_density_chain(std::move(chain));
-        return total_variation(elsex::inverse_laplace_density(density, State{0}, horizon, 24),
+        auto chain = else_sim::density_subnetworks(model, rates, State{0}, steps, options);
+        auto density = else_sim::make_density_chain(std::move(chain));
+        return total_variation(else_sim::inverse_laplace_density(density, State{0}, horizon, 24),
                                reference);
     };
 
@@ -153,16 +155,37 @@ void test_composition_converges_to_the_matrix_exponential() {
     check::done("composition converges to exp(R t) as the chain lengthens");
 }
 
+void test_entrance_resampling_scales_boundary_arrival() {
+    const auto model = closed_chain();
+    const Rates rates{birth, death};
+    num::array<else_sim::Subnetwork<State>> subnetworks;
+    subnetworks.push_back(
+        else_sim::restriction(model, rates, num::array<State>{{0}, {1}, {2}, {3}}));
+    subnetworks.push_back(
+        else_sim::restriction(model, rates, num::array<State>{{4}, {5}, {6}, {7}, {8}}));
+    num::array<num::table<State, real>> scales(2);
+    scales[0][State{0}] = 1.0;
+    scales[1][State{4}] = 3.0;
+    auto density = else_sim::make_density_chain(std::move(subnetworks), scales);
+
+    num::array<num::cplx> local(4, num::cplx(0.0, 0.0));
+    local[3] = num::cplx(2.0, 0.0);
+    const auto arrival = else_sim::advance_arrival(density, 0, local);
+    check::close(arrival[0].real(), 6.0 * birth,
+                 "the empirical-to-exact ratio scales the next entrance", 1e-12);
+    check::done("density composition applies entrance-resampling weights");
+}
+
 void test_density_is_a_distribution() {
     const auto model = closed_chain();
     const Rates rates{birth, death};
-    elsex::EnsembleOptions options;
+    else_sim::EnsembleOptions options;
     options.capacity = 64;
 
-    auto chain = elsex::density_subnetworks(model, rates, State{3}, 6, options);
+    auto chain = else_sim::density_subnetworks(model, rates, State{3}, 6, options);
     check::that(!chain.empty(), "the chain is non-empty");
-    auto density = elsex::make_density_chain(std::move(chain));
-    const auto solution = elsex::inverse_laplace_density(density, State{3}, horizon, 24);
+    auto density = else_sim::make_density_chain(std::move(chain));
+    const auto solution = else_sim::inverse_laplace_density(density, State{3}, horizon, 24);
 
     check::that(solution.states.size() == solution.probability.size(),
                 "one probability per represented state");
@@ -175,10 +198,96 @@ void test_density_is_a_distribution() {
     check::done("the reported density is a normalized distribution");
 }
 
+void test_multinomial_particle_resampling() {
+    const num::table<State, real> exit_distribution{
+        {State{0}, 0.6}, {State{1}, 0.3}, {State{2}, 0.1}};
+    constexpr idx particles = 20;
+    num::rng random(7);
+
+    const auto sample =
+        else_sim::multinomial_particle_resample(exit_distribution, particles, random);
+    real total = 0.0;
+    for (const auto &[state, weight] : sample) {
+        total += weight;
+        const real count = weight * static_cast<real>(particles);
+        check::close(count, std::round(count), "particle weights are empirical counts", 1e-12);
+    }
+    check::close(total, 1.0, "particle resampling preserves total mass", 1e-12);
+    check::that(sample.size() <= particles, "repeated particle draws are aggregated");
+
+    constexpr idx repetitions = 5000;
+    num::array<real> mean(3, 0.0);
+    for (idx repetition = 0; repetition < repetitions; ++repetition) {
+        const auto resampled =
+            else_sim::multinomial_particle_resample(exit_distribution, particles, random);
+        for (const auto &[state, weight] : resampled)
+            mean[static_cast<idx>(state[0])] += weight / static_cast<real>(repetitions);
+    }
+    check::close(mean[0], 0.6, "particle mean recovers the first exit weight", 8e-3);
+    check::close(mean[1], 0.3, "particle mean recovers the second exit weight", 8e-3);
+    check::close(mean[2], 0.1, "particle mean recovers the third exit weight", 8e-3);
+    std::printf("          (particle mean after %zu resamples: %.4f, %.4f, %.4f)\n",
+                static_cast<num::idx>(repetitions), mean[0], mean[1], mean[2]);
+    check::done("multinomial density particles recover the exit distribution in mean");
+}
+
+void test_density_resampling_policy() {
+    const num::table<State, real> exit_distribution{
+        {State{0}, 0.4}, {State{1}, 0.3}, {State{2}, 0.2}, {State{3}, 0.1}};
+    else_sim::EnsembleOptions options;
+    options.capacity = 3;
+    options.density_resampling = else_sim::DensityResampling::MultinomialParticles;
+    options.density_particles = 3;
+    num::rng random(11);
+
+    const auto sample = else_sim::resample_density_support(exit_distribution, options, random);
+    real total = 0.0;
+    for (const auto &[state, weight] : sample)
+        total += weight;
+    check::close(total, 1.0, "selected particle policy preserves mass", 1e-12);
+    check::that(sample.size() <= options.density_particles,
+                "particle policy returns no more unique states than walkers");
+    check::done("density options select multinomial-particle resampling");
+}
+
+void test_particle_resampling_runs_the_density_pipeline() {
+    const auto model = closed_chain();
+    const Rates rates{birth, death};
+    const auto reference = reference_density(horizon, 0);
+
+    const auto distance_for = [&](else_sim::DensityResampling resampling) {
+        else_sim::EnsembleOptions options;
+        options.capacity = 3;
+        options.expansion_depth = 1;
+        options.density_resampling = resampling;
+        options.density_particles = 3;
+        auto chain = else_sim::density_subnetworks(model, rates, State{0}, 12, options, 17);
+        auto density = else_sim::make_density_chain(std::move(chain));
+        const auto solution = else_sim::inverse_laplace_density(density, State{0}, horizon, 18);
+        real total = 0.0;
+        for (const real probability : solution.probability)
+            total += probability;
+        check::close(total, 1.0, "resampled density pipeline returns unit mass", 1e-12);
+        return total_variation(solution, reference);
+    };
+
+    const real support_error = distance_for(else_sim::DensityResampling::WeightedSupport);
+    const real particle_error = distance_for(else_sim::DensityResampling::MultinomialParticles);
+    check::that(std::isfinite(support_error), "weighted-support density error is finite");
+    check::that(std::isfinite(particle_error), "particle-resampled density error is finite");
+    std::printf("          (TV at capacity 3: support %.3e, particles %.3e)\n", support_error,
+                particle_error);
+    check::done("both density policies run through density reconstruction");
+}
+
 int main() {
-    std::printf("elsex density\n");
+    std::printf("else density\n");
     test_single_subnetwork_reproduces_the_matrix_exponential();
     test_composition_converges_to_the_matrix_exponential();
+    test_entrance_resampling_scales_boundary_arrival();
     test_density_is_a_distribution();
-    return check::report("elsex density");
+    test_multinomial_particle_resampling();
+    test_density_resampling_policy();
+    test_particle_resampling_runs_the_density_pipeline();
+    return check::report("else density");
 }

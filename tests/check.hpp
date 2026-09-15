@@ -43,7 +43,9 @@ inline void close(double actual, double expected, const std::string &what,
 
 /// Record that a named case finished. Printed after its checks, so any failure
 /// above it is attributable to it.
-inline void done(const char *name) { std::printf("  ok      %s\n", name); }
+inline void done(const char *name) {
+    std::printf("  ok      %s\n", name);
+}
 
 /// Print the summary and return the process exit status.
 [[nodiscard]] inline int report(const char *suite) {

@@ -2,6 +2,7 @@
 #include "io/sparse_json.hpp"
 #include "linear/sparse/sparse_op.hpp"
 #include "markovkit.hpp"
+#include "stochastic/rng.hpp"
 #include <approxchol/approxchol.hpp>
 #include <chrono>
 #include <cmath>
@@ -13,9 +14,9 @@
 
 class ApproxCholPreconditioner final {
   public:
-    using domain_type = num::Vector;
-    using codomain_type = num::Vector;
-    using math_propositions = num::math::type_list<num::axiom::positive_definite>;
+    using domain_type = num::vec;
+    using codomain_type = num::vec;
+    using math_laws = num::math::type_list<num::law::spd>;
 
     explicit ApproxCholPreconditioner(approxchol::CholeskyFactor<double> factor)
         : factor_(std::move(factor)), n_(factor_.order.size()), scratch_(n_, 0.0) {}
@@ -23,9 +24,9 @@ class ApproxCholPreconditioner final {
     [[nodiscard]] num::idx rows() const noexcept { return n_; }
     [[nodiscard]] num::idx cols() const noexcept { return n_; }
 
-    void apply(const num::Vector &r, num::Vector &z) const {
+    void apply(const num::vec &r, num::vec &z) const {
         if (z.size() != n_) {
-            z = num::Vector(n_, 0.0);
+            z = num::vec(n_, 0.0);
         }
         approxchol::solve(factor_, r.data(), z.data(), scratch_);
     }
@@ -33,15 +34,15 @@ class ApproxCholPreconditioner final {
   private:
     approxchol::CholeskyFactor<double> factor_;
     num::idx n_;
-    mutable std::vector<double> scratch_;
+    mutable num::array<double> scratch_;
 };
 
 template <>
-struct num::math::model_of<ApproxCholPreconditioner> {
-    using laws = type_list<law::linear_map>;
+struct num::math::claims_of<ApproxCholPreconditioner> {
+    using type = type_list<law::linear_map>;
 };
 
-approxchol::Graph<double> graph_from_sparse(const num::SparseMatrix &L) {
+approxchol::Graph<double> graph_from_sparse(const num::spmat &L) {
     const num::idx n = L.n_rows();
     approxchol::Graph<double> G(n);
 
@@ -86,20 +87,20 @@ void run_benchmark_on_file(const std::string &path) {
     std::cout << path << " (N=" << n << ", nnz=" << nnz << "):\n";
 
     auto G = graph_from_sparse(L_sparse);
-    num::operators::SPDOp<num::operators::SparseOp> A_op{num::operators::SparseOp(L_sparse)};
+    num::operators::spd_op<num::operators::sparse_op> A_op{num::operators::sparse_op(L_sparse)};
 
-    num::Vector x_true(n, 0.0);
+    num::vec x_true(n, 0.0);
     for (num::idx i = 0; i < n; ++i) {
         x_true[i] = std::sin(static_cast<double>(i) * 0.1);
     }
-    num::Vector b(n, 0.0);
+    num::vec b(n, 0.0);
     A_op.apply(x_true, b);
 
     const double b_norm = num::norm(b);
     const double tol = std::max(1e-12, 1e-6 * b_norm);
 
     if (n <= 30000) {
-        num::Vector x_cg(n, 0.0);
+        num::vec x_cg(n, 0.0);
         auto t0 = std::chrono::high_resolution_clock::now();
         auto res = num::cg(A_op, b, x_cg, tol, 50000);
         auto t1 = std::chrono::high_resolution_clock::now();
@@ -109,7 +110,7 @@ void run_benchmark_on_file(const std::string &path) {
     }
 
     if (n <= 30000) {
-        num::Vector inv_diag(n, 0.0);
+        num::vec inv_diag(n, 0.0);
         for (num::idx i = 0; i < n; ++i) {
             for (num::idx k = L_sparse.row_ptr()[i]; k < L_sparse.row_ptr()[i + 1]; ++k) {
                 if (L_sparse.col_idx()[k] == i && L_sparse.values()[k] > 0.0) {
@@ -117,8 +118,8 @@ void run_benchmark_on_file(const std::string &path) {
                 }
             }
         }
-        num::JacobiPreconditioner jacobi(std::move(inv_diag));
-        num::Vector x_jacobi(n, 0.0);
+        num::jacobi_preconditioner jacobi(std::move(inv_diag));
+        num::vec x_jacobi(n, 0.0);
         auto t0 = std::chrono::high_resolution_clock::now();
         auto res = num::pcg(A_op, jacobi, b, x_jacobi, tol, 50000);
         auto t1 = std::chrono::high_resolution_clock::now();
@@ -128,11 +129,11 @@ void run_benchmark_on_file(const std::string &path) {
     }
 
     {
-        std::mt19937_64 rng(42);
+        num::rng64 rng(42);
         auto t0 = std::chrono::high_resolution_clock::now();
         auto factor = approxchol::ac1(G, rng);
         ApproxCholPreconditioner prec(std::move(factor));
-        num::Vector x_ac1(n, 0.0);
+        num::vec x_ac1(n, 0.0);
         auto res = num::pcg(A_op, prec, b, x_ac1, tol, 1000);
         auto t1 = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -141,11 +142,11 @@ void run_benchmark_on_file(const std::string &path) {
     }
 
     {
-        std::mt19937_64 rng(42);
+        num::rng64 rng(42);
         auto t0 = std::chrono::high_resolution_clock::now();
         auto factor = approxchol::ac2(G, rng);
         ApproxCholPreconditioner prec(std::move(factor));
-        num::Vector x_ac2(n, 0.0);
+        num::vec x_ac2(n, 0.0);
         auto res = num::pcg(A_op, prec, b, x_ac2, tol, 1000);
         auto t1 = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();

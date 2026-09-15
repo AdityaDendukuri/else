@@ -1,24 +1,21 @@
-#include "else/restriction.hpp"
-#include "markovkit.hpp"
+#include "else/quantities/shedding.hpp"
+#include "else/restriction/restriction.hpp"
+#include "markovkit/reaction_system.hpp"
+#include "plot/plot.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <iomanip>
 #include <iostream>
 #include <numeric>
+#include <span>
 #include <vector>
 
 int main() {
-    std::cout << "========================================================================\n";
-    std::cout << "  ELSE WOODBURY CUT-TIME UPDATE: FLOATING-POINT ERROR & TIMING BENCHMARK \n";
-    std::cout << "========================================================================\n\n";
-
     constexpr num::idx n = 40;
     constexpr double birth_rate = 12.0;
     constexpr double death_rate = 1.0;
-
-    // Define the immigration-death reaction network.
-    markovkit::ReactionSystem model{
+    const markovkit::ReactionSystem model{
         .changes = {{1}, {-1}},
         .propensities = {
             [](const markovkit::State &, const auto &rates, double) { return rates[0]; },
@@ -26,180 +23,105 @@ int main() {
                 return rates[1] * state[0];
             },
         }};
-    const std::vector<double> rates{birth_rate, death_rate};
+    const num::array<double> rates{birth_rate, death_rate};
 
-    std::vector<markovkit::State> states;
-    for (num::idx state = 0; state < n; ++state) {
-        states.push_back(markovkit::State{static_cast<int>(state)});
+    num::array<markovkit::State> states;
+    num::array<double> h(n, 1.0);
+    for (num::idx j = 0; j < n; ++j) {
+        states.push_back({static_cast<int>(j)});
+        if (j > 0)
+            h[j] = h[j - 1] * std::sqrt(birth_rate / (death_rate * j));
     }
 
-    // Stationary Poisson weights for reversible scaling
-    std::vector<double> h(n, 1.0);
-    for (num::idx state = 1; state < n; ++state) {
-        h[state] = h[state - 1] * std::sqrt(birth_rate / (death_rate * state));
-    }
-
-    auto subnetwork = else_sim::reversible_cme_subnetwork(model, rates, states, h);
-
-    // Initial entrance in state 0
-    num::Vector entrance(n, 0.0);
+    const auto subnetwork =
+        else_sim::reversible_restriction(model, rates, states, num::view<const double>(h));
+    num::vec entrance(n, 0.0);
     entrance[0] = 1.0;
-    const auto u = subnetwork.occupation(entrance);
+    const auto shedding = else_sim::shedding_state(subnetwork, entrance);
+    const double full_time =
+        std::accumulate(shedding.occupation.begin(), shedding.occupation.end(), 0.0);
 
-    // Compare each Woodbury score with a fresh reduced solve.
-    std::cout
-        << "--- 1. Component-Wise Floating-Point Error (Woodbury vs Naive Ground Truth) ---\n\n";
-    std::cout << std::left << std::setw(8) << "State" << std::setw(16) << "Woodbury Loss"
-              << std::setw(16) << "Naive Loss" << std::setw(18) << "Relative Error" << std::setw(20)
-              << "safe_add Bound" << std::setw(20) << "Backward Residual" << "\n";
-    std::cout << std::string(98, '-') << "\n";
-
-    std::vector<double> state_indices(n);
-    std::vector<double> rel_errors(n);
-    std::vector<double> safe_add_bounds(n);
-    std::vector<double> backward_residuals(n);
-
-    double max_rel_error = 0.0;
-    double max_safe_add_bound = 0.0;
-    double max_backward_res = 0.0;
-
-    for (num::idx i = 0; i < n; ++i) {
-        state_indices[i] = static_cast<double>(i);
-        const std::vector<num::idx> block{i};
-
-        auto diag = subnetwork.cut_time_loss_with_diagnostics(u, block, 1e-6);
-        double loss_woodbury = diag.loss;
-        double loss_naive = subnetwork.naive_cut_time_loss(u, block);
-
-        double err = std::abs(loss_woodbury - loss_naive);
-        double rel_err = err / std::max(1e-12, loss_naive);
-        double bres = diag.estimated_error;
-
-        // safe_add precision tracking metric: eps_mach * |loss| / loss
-        double x = loss_woodbury;
-        double acc_err = 0.0;
-        num::safe_add(x, acc_err, 0.0, 1e-6);
-        double safe_bound = acc_err / std::max(1e-12, loss_woodbury);
-
-        rel_errors[i] = std::max(1e-18, rel_err);
-        safe_add_bounds[i] = std::max(1e-18, safe_bound);
-        backward_residuals[i] = std::max(1e-18, bres);
-
-        max_rel_error = std::max(max_rel_error, rel_err);
-        max_safe_add_bound = std::max(max_safe_add_bound, safe_bound);
-        max_backward_res = std::max(max_backward_res, bres);
-
-        if (i < 8 || i >= n - 5 || i % 5 == 0) {
-            std::cout << std::left << std::setw(8) << i << std::setw(16) << std::scientific
-                      << std::setprecision(3) << loss_woodbury << std::setw(16) << std::scientific
-                      << std::setprecision(3) << loss_naive << std::setw(18) << std::scientific
-                      << std::setprecision(3) << rel_err << std::setw(20) << std::scientific
-                      << std::setprecision(3) << safe_bound << std::setw(20) << std::scientific
-                      << std::setprecision(3) << bres << "\n";
+    const auto direct_loss = [&](num::view<const num::idx> removed) {
+        num::array<bool> drop(n, false);
+        for (num::idx j : removed)
+            drop[j] = true;
+        num::array<markovkit::State> kept;
+        num::array<double> kept_h;
+        num::idx entrance_row = n;
+        for (num::idx j = 0; j < n; ++j) {
+            if (drop[j])
+                continue;
+            if (j == 0)
+                entrance_row = kept.size();
+            kept.push_back(states[j]);
+            kept_h.push_back(h[j]);
         }
+        if (entrance_row == n)
+            return full_time;
+        const auto reduced = else_sim::reversible_restriction(model, rates, std::move(kept),
+                                                              num::view<const double>(kept_h));
+        num::vec reduced_entrance(else_sim::size(reduced), 0.0);
+        reduced_entrance[entrance_row] = 1.0;
+        const num::vec occupation = else_sim::solve_transpose(reduced, reduced_entrance);
+        return full_time - std::accumulate(occupation.begin(), occupation.end(), 0.0);
+    };
+
+    num::array<double> indices, relative_errors, residuals;
+    for (num::idx j = 1; j < n; ++j) {
+        const num::array<num::idx> removed{j};
+        const auto update = else_sim::joint_cut_time_loss(subnetwork, shedding, removed);
+        const double direct = direct_loss(removed);
+        indices.push_back(static_cast<double>(j));
+        relative_errors.push_back(
+            std::max(1e-18, std::abs(update.loss - direct) / std::max(1e-12, direct)));
+        residuals.push_back(std::max(1e-18, update.backward_residual));
     }
-    std::cout << "\nMax Component-Wise Relative Error:     " << std::scientific << max_rel_error
-              << "\n";
-    std::cout << "Max safe_add Precision Bound:         " << std::scientific << max_safe_add_bound
-              << "\n";
-    std::cout << "Max Component-Wise Backward Residual: " << std::scientific << max_backward_res
-              << "\n\n";
 
-    // Measure how the update behaves as the removed block grows.
-    std::cout
-        << "--- 2. Block Cut Set Benchmark: Woodbury Principal Inversion vs Naive Scratch ---\n\n";
-    std::cout << std::left << std::setw(14) << "Block Size k" << std::setw(18) << "Woodbury (us)"
-              << std::setw(18) << "Naive (us)" << std::setw(16) << "Rel Discrepancy" << "\n";
-    std::cout << std::string(66, '-') << "\n";
-
-    const std::vector<num::idx> block_sizes = {1, 2, 4, 8, 12, 16, 20};
-    constexpr int repetitions = 300;
-    constexpr double precision_tolerance = 1e-6;
-    std::vector<double> plotted_block_sizes;
-    std::vector<double> accumulated_error_checks;
-    std::vector<double> block_relative_discrepancies;
-    std::vector<double> precision_tolerances;
-
-    for (num::idx k : block_sizes) {
-        std::vector<num::idx> block(k);
-        for (num::idx i = 0; i < k; ++i) {
-            block[i] = i + 1; // Nested blocks; preserve entrance state 0.
-        }
-
-        // Warmup & discrepancy
-        const auto diagnostics =
-            subnetwork.cut_time_loss_with_diagnostics(u, block, precision_tolerance);
-        double w_loss = diagnostics.loss;
-        double n_loss = subnetwork.naive_cut_time_loss(u, block);
-        double rel_diff = std::abs(w_loss - n_loss) / std::max(1e-12, n_loss);
-
-        plotted_block_sizes.push_back(static_cast<double>(k));
-        accumulated_error_checks.push_back(std::max(1e-18, diagnostics.estimated_error));
-        block_relative_discrepancies.push_back(std::max(1e-18, rel_diff));
-        precision_tolerances.push_back(precision_tolerance);
-
-        // Benchmark Woodbury
-        auto t0 = std::chrono::high_resolution_clock::now();
-        for (int r = 0; r < repetitions; ++r) {
-            volatile double l = subnetwork.cut_time_loss(u, block);
-            (void)l;
-        }
-        auto t1 = std::chrono::high_resolution_clock::now();
-        double w_us = std::chrono::duration<double, std::micro>(t1 - t0).count() / repetitions;
-
-        // Benchmark Naive
-        auto t2 = std::chrono::high_resolution_clock::now();
-        for (int r = 0; r < repetitions; ++r) {
-            volatile double l = subnetwork.naive_cut_time_loss(u, block);
-            (void)l;
-        }
-        auto t3 = std::chrono::high_resolution_clock::now();
-        double n_us = std::chrono::duration<double, std::micro>(t3 - t2).count() / repetitions;
-
-        std::cout << std::left << std::setw(14) << k << std::setw(18) << std::fixed
-                  << std::setprecision(2) << w_us << std::setw(18) << std::fixed
-                  << std::setprecision(2) << n_us << std::setw(16) << std::scientific
-                  << std::setprecision(2) << rel_diff << "\n";
-    }
-    std::cout << "\n";
-
-    // Plot error and runtime against removed block size.
-    num::plt::plot(state_indices, rel_errors,
-                   "Relative Discrepancy |Loss_{Woodbury} - Loss_{Naive}| / Loss_{Naive}",
-                   "lines lw 2 lc rgb '#c0392b'");
-    num::plt::plot(state_indices, safe_add_bounds,
-                   "safe\\_add Precision Bound (\\varepsilon_{mach} |x| / x)",
-                   "lines dt 2 lw 2 lc rgb '#27ae60'");
-    num::plt::plot(state_indices, backward_residuals,
-                   "Linear Residual ||Z_{SS} c - u_S||_{\\infty}",
-                   "lines dt 3 lw 2 lc rgb '#2980b9'");
-    num::plt::title("ELSE Cut-Time Update Precision & Floating-Point Error Metrics");
-    num::plt::xlabel("Removed State Index j");
-    num::plt::ylabel("Relative Precision / Error");
+    num::plt::plot(indices, relative_errors, "Woodbury--direct discrepancy", "lines lw 2");
+    num::plt::plot(indices, residuals, "small-system backward residual", "lines dt 2 lw 2");
+    num::plt::title("Cut-time update floating-point check");
+    num::plt::xlabel("removed state");
+    num::plt::ylabel("relative error");
     num::plt::semilogy();
     num::plt::legend();
     num::plt::savefig("else_shedding_comparison.png");
 
-    std::cout << "[SUCCESS] Floating-point error plot saved to else_shedding_comparison.png\n";
+    const num::array<num::idx> block_sizes{1, 2, 4, 8, 12, 16, 20};
+    num::array<double> sizes, update_times, direct_times, block_residuals;
+    constexpr int repetitions = 100;
+    for (num::idx count : block_sizes) {
+        num::array<num::idx> removed(count);
+        std::iota(removed.begin(), removed.end(), num::idx(1));
+        const auto update = else_sim::joint_cut_time_loss(subnetwork, shedding, removed);
+        const auto start_update = std::chrono::steady_clock::now();
+        for (int repeat = 0; repeat < repetitions; ++repeat)
+            (void)else_sim::joint_cut_time_loss(subnetwork, shedding, removed);
+        const auto stop_update = std::chrono::steady_clock::now();
+        const auto start_direct = std::chrono::steady_clock::now();
+        for (int repeat = 0; repeat < repetitions; ++repeat)
+            (void)direct_loss(removed);
+        const auto stop_direct = std::chrono::steady_clock::now();
 
-    // Plot the actual error estimate accumulated by safe_add while evaluating
-    // q_S^T (Z_SS)^-1 u_S.  Each point contains all additions for that block.
-    num::plt::plot(plotted_block_sizes, accumulated_error_checks,
-                   "Accumulated safe\\_add estimate e/x",
-                   "linespoints pt 7 ps 0.8 lw 2 lc rgb '#27ae60'");
-    num::plt::plot(plotted_block_sizes, block_relative_discrepancies,
-                   "Measured Woodbury--direct discrepancy",
-                   "linespoints pt 5 ps 0.8 lw 2 lc rgb '#c0392b'");
-    num::plt::plot(plotted_block_sizes, precision_tolerances, "Acceptance tolerance 10^{-6}",
-                   "lines dt 2 lw 2 lc rgb '#2c3e50'");
-    num::plt::title("Accumulated Floating-Point Check for Block Shedding");
-    num::plt::xlabel("Removed block size |S|");
-    num::plt::ylabel("Relative error estimate");
+        sizes.push_back(static_cast<double>(count));
+        update_times.push_back(
+            std::chrono::duration<double, std::micro>(stop_update - start_update).count() /
+            repetitions);
+        direct_times.push_back(
+            std::chrono::duration<double, std::micro>(stop_direct - start_direct).count() /
+            repetitions);
+        block_residuals.push_back(std::max(1e-18, update.backward_residual));
+    }
+
+    num::plt::plot(sizes, block_residuals, "backward residual", "linespoints lw 2");
+    num::plt::title("Floating-point check for block shedding");
+    num::plt::xlabel("removed block size");
+    num::plt::ylabel("relative residual");
     num::plt::semilogy();
-    num::plt::legend();
     num::plt::savefig("else_safe_add_accumulation.png");
 
-    std::cout << "[SUCCESS] Accumulated safe_add plot saved to "
-                 "else_safe_add_accumulation.png\n";
-    return 0;
+    std::cout << std::left << std::setw(8) << "states" << std::setw(18) << "Woodbury (us)"
+              << "refactor (us)\n";
+    for (num::idx i = 0; i < sizes.size(); ++i)
+        std::cout << std::setw(8) << sizes[i] << std::setw(18) << update_times[i] << direct_times[i]
+                  << '\n';
 }

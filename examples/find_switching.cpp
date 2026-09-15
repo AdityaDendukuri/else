@@ -1,4 +1,6 @@
-#include "markovkit.hpp"
+#include "else/algorithms/ensemble.hpp"
+#include "markovkit/reaction_system.hpp"
+#include "ssa/ssa.hpp"
 #include <algorithm>
 #include <iostream>
 #include <vector>
@@ -11,21 +13,21 @@ void test_params(double scale, const std::string &name) {
     const double d_u = 1.0 + (0.1 / 1.1);
     const double d_v = 1.0;
 
-    const std::vector<double> rates = {alpha, beta, K3, d_u, alpha, beta, K3, d_v};
+    const num::array<double> rates = {alpha, beta, K3, d_u, alpha, beta, K3, d_v};
 
     markovkit::ReactionSystem model;
     model.changes = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
     model.propensities = {
-        [](const markovkit::State &x, const std::vector<double> &r, double) {
+        [](const markovkit::State &x, const num::array<double> &r, double) {
             double v3 = static_cast<double>(x[1]) * x[1] * x[1];
             return r[0] + (r[1] * r[2] / (r[2] + v3));
         },
-        [](const markovkit::State &x, const std::vector<double> &r, double) { return r[3] * x[0]; },
-        [](const markovkit::State &x, const std::vector<double> &r, double) {
+        [](const markovkit::State &x, const num::array<double> &r, double) { return r[3] * x[0]; },
+        [](const markovkit::State &x, const num::array<double> &r, double) {
             double u3 = static_cast<double>(x[0]) * x[0] * x[0];
             return r[4] + (r[5] * r[6] / (r[6] + u3));
         },
-        [](const markovkit::State &x, const std::vector<double> &r, double) { return r[7] * x[1]; },
+        [](const markovkit::State &x, const num::array<double> &r, double) { return r[7] * x[1]; },
     };
 
     const markovkit::State initial_state{static_cast<int>(std::round(17.0 * scale / 0.2)), 1};
@@ -51,7 +53,7 @@ void test_params(double scale, const std::string &name) {
     std::cout << "  SSA switches: " << ssa_switches << "/10 paths\n";
 
     // Test ELSE
-    else_sim::ELSEOptions opt{
+    else_sim::EnsembleOptions opt{
         .capacity = 300, .expansion_depth = 1, .tolerance = 1e-12, .maximum_steps = 100000};
     auto ens = else_sim::else_ensemble(model, rates, initial_state, 20, 0.0, final_time, opt, 42,
                                        [](const markovkit::State &x) { return x[0]; });

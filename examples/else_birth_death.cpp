@@ -1,4 +1,6 @@
-#include "markovkit.hpp"
+#include "else/algorithms/ensemble.hpp"
+#include "markovkit/reaction_system.hpp"
+#include "markovkit/trajectory.hpp"
 #include <vector>
 
 int main() {
@@ -6,12 +8,10 @@ int main() {
     markovkit::ReactionSystem model;
     model.changes = {{1}, {-1}};
     model.propensities = {
-        [](const markovkit::State &, const std::vector<double> &r, double) { return r[0]; },
-        [](const markovkit::State &x, const std::vector<double> &r, double) {
-            return r[1] * x[0];
-        }};
+        [](const markovkit::State &, const num::array<double> &r, double) { return r[0]; },
+        [](const markovkit::State &x, const num::array<double> &r, double) { return r[1] * x[0]; }};
 
-    const std::vector<double> rates = {5.0, 0.1};
+    const num::array<double> rates = {5.0, 0.1};
     const markovkit::State initial{0};
 
     // Simulate by sampling exits from small local subnetworks.

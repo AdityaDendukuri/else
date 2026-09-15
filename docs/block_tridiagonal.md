@@ -79,7 +79,7 @@ L_k\in\mathbb R^{n_{k+1}\times n_k}.
 The implementation records both permutations:
 
 - `order[new] = old`, used to gather and scatter right-hand sides;
-- `inverse_order[old] = new`, used to assemble the blocks from CSR entries.
+- `inverse_order[old] = new`, used to assemble the blocks from csr entries.
 
 Here, *scatter* only means copying the solved entries from level order back to
 the original state order.
@@ -232,7 +232,7 @@ The trajectory and density builders follow the same sequence:
 1. Receive a level function from the caller.
 2. Enumerate the states of a subnetwork.
 3. Evaluate and compress the supplied level labels.
-4. Assemble the truncated generator in CSR form.
+4. Assemble the truncated generator in csr form.
 5. Pass the explicit levels to `Subnetwork`.
 6. Factor \(-R\) once and reuse it for occupation and moment solves.
 

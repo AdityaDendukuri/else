@@ -230,13 +230,14 @@ grow and so would the correction rank.
 
 The current trajectory implementation therefore uses a short-update policy:
 
-1. Reuse the stored factors while at most three slots differ from the base.
-2. If more than three slots differ, factorize the current matrix normally.
-3. Make that current matrix and its factors the new base.
+1. Use Woodbury while at most three slots differ from a stored dense factor.
+2. For a block factor, retain the prefix before the earliest changed block and
+   refactor the remaining suffix.
+3. If the required block prefix no longer agrees, factorize the current matrix normally.
+4. Make the current block factors, or a freshly computed dense factor, the new base.
 
-The value three is an empirical guard for the fast block-tridiagonal backend,
-not a mathematical limit. The dense results below show that a larger cutoff is
-appropriate for dense LU or Cholesky.
+The dense cutoff is an empirical guard rather than a mathematical limit. The
+block path has no rank cutoff because it does not form a low-rank correction.
 
 For an updated solve, the code checks
 
@@ -304,11 +305,10 @@ Reproduce with
 ./build/benchmarks/factor_reuse_cme 1000 1 600 block
 ```
 
-## 10. Relation to direct block-factor reuse
+## 10. Direct block-factor reuse
 
-The current implementation uses the block LU or block Cholesky factors only
-through applications of \(A_0^{-1}\) inside Woodbury. It does not update the
-block-Thomas Schur factors themselves.
+The block LU and block Cholesky implementations update the block-Thomas Schur
+factors directly. Dense factors continue to use Woodbury.
 
 For a block-tridiagonal matrix with diagonal blocks \(D_k\), lower blocks
 \(L_k\), and upper blocks \(B_k\), block Thomas forms
@@ -320,7 +320,7 @@ S_k=D_k-L_{k-1}S_{k-1}^{-1}B_{k-1}.
 \]
 
 If the first changed block is \(j\), the factors of
-\(S_0,\ldots,S_{j-1}\) can be retained and only the suffix beginning at
-\(S_j\) must be recomputed. Such a direct block-factor update would eliminate
-the Woodbury solves and make the new factors the base for the following step.
-It is a distinct method and has not yet replaced the current Woodbury path.
+\(S_0,\ldots,S_{j-1}\) are retained and only the suffix beginning at
+\(S_j\) is recomputed. The implementation also assembles only this suffix and
+its incoming coupling. The updated factors become the base for the following
+step, eliminating the auxiliary Woodbury solves on the block path.

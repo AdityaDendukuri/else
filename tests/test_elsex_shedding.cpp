@@ -8,9 +8,9 @@
 
 #include "check.hpp"
 
+#include "else/core/subnetwork.hpp"
 #include "else/else.hpp"
-#include "elsex/shedding.hpp"
-#include "elsex/subnetwork.hpp"
+#include "else/quantities/shedding.hpp"
 
 #include "container/matrix_expr.hpp"
 #include "linear/factorization/inverse_diagonal.hpp"
@@ -24,7 +24,7 @@
 
 namespace {
 
-using State = std::vector<int>;
+using State = num::multi_index;
 using num::idx;
 using num::real;
 
@@ -33,11 +33,11 @@ constexpr real death_coefficient = 0.45;
 
 struct Chain {
     idx size = 0;
-    std::vector<State> states;
-    std::vector<idx> rows, cols;
-    std::vector<real> values;
-    std::vector<elsex::BoundaryTransition<State>> boundary;
-    std::vector<real> stationary; // full-chain stationary weights, restricted
+    num::array<State> states;
+    num::array<idx> rows, cols;
+    num::array<real> values;
+    num::array<else_sim::BoundaryTransition<State>> boundary;
+    num::array<real> stationary; // full-chain stationary weights, restricted
 };
 
 /// Birth-death chain on copy numbers 1..n with constant birth and linear death.
@@ -86,34 +86,18 @@ Chain make_chain(idx n) {
     return chain;
 }
 
-elsex::Subnetwork<State> build(const Chain &chain) {
-    return elsex::Subnetwork<State>(
+else_sim::Subnetwork<State> build(const Chain &chain) {
+    return else_sim::make_subnetwork(
         chain.states,
-        num::SparseMatrix::from_triplets(chain.size, chain.size, chain.rows, chain.cols,
-                                         chain.values),
+        num::spmat::from_triplets(chain.size, chain.size, chain.rows, chain.cols, chain.values),
         chain.boundary);
 }
 
-/// Legacy tree, which stores the transpose.
-else_sim::Subnetwork<double, std::size_t, State> build_legacy(const Chain &chain) {
-    std::vector<std::size_t> rows(chain.cols.begin(), chain.cols.end());
-    std::vector<std::size_t> cols(chain.rows.begin(), chain.rows.end());
-    std::vector<else_sim::BoundaryTransition<std::size_t, State, double>> boundary;
-    for (const auto &transition : chain.boundary) {
-        boundary.push_back({transition.source, transition.destination, transition.rate});
-    }
-    return else_sim::Subnetwork<double, std::size_t, State>(
-        chain.states,
-        else_sim::SparseMatrix<double, std::size_t>::from_triplets(chain.size, chain.size, rows,
-                                                                   cols, chain.values),
-        std::move(boundary));
-}
-
 /// Cut time with `removed` deleted: solve the reduced system directly.
-real reduced_cut_time(const Chain &chain, const num::Vector &entrance_mixture, idx removed) {
+real reduced_cut_time(const Chain &chain, const num::vec &entrance_mixture, idx removed) {
     const idx n = chain.size;
-    std::vector<idx> kept;
-    std::vector<idx> position(n, n);
+    num::array<idx> kept;
+    num::array<idx> position(n, n);
     for (idx i = 0; i < n; ++i) {
         if (i != removed) {
             position[i] = kept.size();
@@ -121,9 +105,8 @@ real reduced_cut_time(const Chain &chain, const num::Vector &entrance_mixture, i
         }
     }
 
-    const num::SparseMatrix full =
-        num::SparseMatrix::from_triplets(n, n, chain.rows, chain.cols, chain.values);
-    num::Matrix reduced(kept.size(), kept.size(), 0.0);
+    const num::spmat full = num::spmat::from_triplets(n, n, chain.rows, chain.cols, chain.values);
+    num::mat reduced(kept.size(), kept.size(), 0.0);
     for (idx a = 0; a < kept.size(); ++a) {
         for (idx b = 0; b < kept.size(); ++b) {
             reduced(a, b) = -full(kept[a], kept[b]); // M = -R restricted to the kept states
@@ -131,8 +114,8 @@ real reduced_cut_time(const Chain &chain, const num::Vector &entrance_mixture, i
     }
 
     const auto factor = num::lu(num::make_square(reduced));
-    num::Vector ones(kept.size(), 1.0);
-    num::Vector exit_time(kept.size(), 0.0);
+    num::vec ones(kept.size(), 1.0);
+    num::vec exit_time(kept.size(), 0.0);
     num::lu_solve(factor, ones, exit_time);
 
     real total = 0.0;
@@ -142,8 +125,8 @@ real reduced_cut_time(const Chain &chain, const num::Vector &entrance_mixture, i
     return total;
 }
 
-num::Vector make_mixture(idx n) {
-    num::Vector mixture(n, 0.0);
+num::vec make_mixture(idx n) {
+    num::vec mixture(n, 0.0);
     mixture[2] = 0.6;
     mixture[5] = 0.4;
     return mixture;
@@ -154,9 +137,9 @@ num::Vector make_mixture(idx n) {
 void test_exact_loss_matches_its_definition() {
     const Chain chain = make_chain(11);
     const auto subnetwork = build(chain);
-    const num::Vector mixture = make_mixture(chain.size);
-    const auto state = elsex::shedding_state(subnetwork, mixture);
-    const num::Vector losses = elsex::exact_cut_time_losses(subnetwork, state);
+    const num::vec mixture = make_mixture(chain.size);
+    const auto state = else_sim::shedding_state(subnetwork, mixture);
+    const num::vec losses = else_sim::exact_cut_time_losses(subnetwork, state);
 
     real full_cut_time = 0.0;
     for (idx i = 0; i < chain.size; ++i) {
@@ -174,61 +157,19 @@ void test_exact_loss_matches_its_definition() {
     check::done("exact cut-time loss equals the time actually lost");
 }
 
-void test_exact_loss_matches_legacy() {
-    const Chain chain = make_chain(11);
-    const auto subnetwork = build(chain);
-    const auto legacy = build_legacy(chain);
-    const num::Vector mixture = make_mixture(chain.size);
-    const auto state = elsex::shedding_state(subnetwork, mixture);
-    const num::Vector losses = elsex::exact_cut_time_losses(subnetwork, state);
-
-    std::vector<double> legacy_occupation(state.occupation.data(),
-                                          state.occupation.data() + state.occupation.size());
-    const auto legacy_losses = legacy.cut_time_losses(legacy_occupation);
-    for (idx j = 0; j < chain.size; ++j) {
-        check::close(losses[j], legacy_losses[j], "exact loss vs legacy", 1e-11);
-    }
-    check::done("exact cut-time loss matches the legacy implementation");
-}
-
-void test_expected_entries_matches_legacy() {
-    const Chain chain = make_chain(11);
-    const auto subnetwork = build(chain);
-    const auto legacy = build_legacy(chain);
-    const num::Vector mixture = make_mixture(chain.size);
-    const auto state = elsex::shedding_state(subnetwork, mixture);
-    const num::Vector entries = elsex::expected_entries(subnetwork, state);
-
-    std::vector<double> legacy_occupation(state.occupation.data(),
-                                          state.occupation.data() + state.occupation.size());
-    std::vector<std::size_t> all(chain.size);
-    for (idx i = 0; i < chain.size; ++i) {
-        all[i] = i;
-    }
-    const auto legacy_scores =
-        else_sim::expected_visit_scores(legacy, legacy_occupation, std::span<const std::size_t>(all));
-
-    // The legacy routine stops at (-R_jj) u_j; the paper subtracts the entrance
-    // mass, which the legacy caller does separately at its call site.
-    for (idx j = 0; j < chain.size; ++j) {
-        check::close(entries[j] + mixture[j], legacy_scores[j], "expected entries vs legacy");
-    }
-    check::done("expected entries matches the legacy implementation");
-}
-
 void test_stationary_normalization_preserves_inverse_diagonal() {
     const Chain chain = make_chain(11);
     const auto subnetwork = build(chain);
 
-    std::vector<real> weights(chain.size);
+    num::array<real> weights(chain.size);
     for (idx j = 0; j < chain.size; ++j) {
         weights[j] = std::sqrt(chain.stationary[j]);
     }
-    const num::SparseMatrix normalized =
-        elsex::detail::similarity_scaled(subnetwork.operator_matrix(), weights);
+    const num::spmat normalized =
+        else_sim::detail::similarity_scaled(subnetwork.operator_matrix, weights);
 
     // Detailed balance makes the normalized operator symmetric.
-    const num::Matrix dense_normalized = num::dense(normalized);
+    const num::mat dense_normalized = num::dense(normalized);
     for (idx i = 0; i < chain.size; ++i) {
         for (idx j = 0; j < chain.size; ++j) {
             check::close(dense_normalized(i, j), dense_normalized(j, i),
@@ -237,12 +178,12 @@ void test_stationary_normalization_preserves_inverse_diagonal() {
     }
 
     // Diagonal similarity preserves the inverse diagonal.
-    const num::AutoLinearSolver normalized_factor(normalized);
-    const num::Vector normalized_diagonal = num::inverse_diagonal(normalized_factor);
-    const num::Vector exact_diagonal = num::inverse_diagonal(subnetwork.factor());
+    const num::auto_linear_solver normalized_factor(normalized);
+    const num::vec normalized_diagonal = num::inverse_diagonal(normalized_factor);
+    const num::vec exact_diagonal = else_sim::inverse_diagonal(subnetwork);
     for (idx j = 0; j < chain.size; ++j) {
-        check::close(normalized_diagonal[j], exact_diagonal[j],
-                     "diag(Mtilde^-1) equals diag(M^-1)", 1e-11);
+        check::close(normalized_diagonal[j], exact_diagonal[j], "diag(Mtilde^-1) equals diag(M^-1)",
+                     1e-11);
     }
     check::done("stationary normalization preserves the inverse diagonal");
 }
@@ -250,11 +191,11 @@ void test_stationary_normalization_preserves_inverse_diagonal() {
 void test_probe_estimator_converges() {
     const Chain chain = make_chain(11);
     const auto subnetwork = build(chain);
-    const num::Vector exact = num::inverse_diagonal(subnetwork.factor());
+    const num::vec exact = else_sim::inverse_diagonal(subnetwork);
 
     const auto mean_relative_error = [&](idx probes) {
-        const num::Vector estimate = elsex::probed_inverse_diagonal(
-            subnetwork, std::span<const real>(chain.stationary), probes, 20260828u);
+        const num::vec estimate = else_sim::probed_inverse_diagonal(
+            subnetwork, num::view<const real>(chain.stationary), probes, 20260828u);
         real total = 0.0;
         for (idx j = 0; j < chain.size; ++j) {
             total += std::abs(estimate[j] - exact[j]) / exact[j];
@@ -272,12 +213,92 @@ void test_probe_estimator_converges() {
     check::done("probe estimator converges to the exact inverse diagonal");
 }
 
-void test_lowest_scores_selection() {
-    const std::vector<real> scores{5.0, 1.0, 3.0, 1.0, 4.0, 0.5};
-    const std::vector<idx> protected_states{5, 1};
+void test_sparse_lanczos_estimator_on_large_laplacian() {
+    constexpr idx n = 10000;
+    constexpr real shift = 0.5;
+    num::array<int> states(n);
+    num::array<idx> rows;
+    num::array<idx> columns;
+    num::array<real> values;
+    rows.reserve(3 * n - 2);
+    columns.reserve(3 * n - 2);
+    values.reserve(3 * n - 2);
+    for (idx j = 0; j < n; ++j) {
+        states[j] = static_cast<int>(j);
+        rows.push_back(j);
+        columns.push_back(j);
+        values.push_back(-(2.0 + shift));
+        if (j > 0) {
+            rows.push_back(j);
+            columns.push_back(j - 1);
+            values.push_back(1.0);
+        }
+        if (j + 1 < n) {
+            rows.push_back(j);
+            columns.push_back(j + 1);
+            values.push_back(1.0);
+        }
+    }
 
-    const auto chosen = elsex::lowest_scores(std::span<const real>(scores),
-                                             std::span<const idx>(protected_states), 3);
+    const auto subnetwork = else_sim::make_subnetwork(
+        std::move(states), num::spmat::from_triplets(n, n, rows, columns, values),
+        num::array<else_sim::BoundaryTransition<int>>{}, num::vec(n, 1.0), num::view<const idx>{},
+        false);
+    const num::vec estimate = else_sim::probed_inverse_diagonal(
+        subnetwork, subnetwork.stationary.span(), 64, 20260910u, 32, 1e-9);
+
+    // Exact diagonal of the inverse of the shifted tridiagonal Laplacian from
+    // its LDL^T recurrence, computed in O(n) without a dense reference matrix.
+    num::vec pivots(n, 0.0);
+    num::vec exact(n, 0.0);
+    pivots[0] = 2.0 + shift;
+    for (idx j = 1; j < n; ++j)
+        pivots[j] = 2.0 + shift - 1.0 / pivots[j - 1];
+    exact[n - 1] = 1.0 / pivots[n - 1];
+    for (idx j = n - 1; j-- > 0;)
+        exact[j] = 1.0 / pivots[j] + exact[j + 1] / (pivots[j] * pivots[j]);
+
+    real mean_relative_error = 0.0;
+    for (idx j = 0; j < n; ++j)
+        mean_relative_error += std::abs(estimate[j] - exact[j]) / exact[j];
+    mean_relative_error /= static_cast<real>(n);
+
+    check::that(mean_relative_error < 0.1,
+                "large sparse Lanczos estimate has small mean relative error");
+    std::printf("          (n: %zu, probes: 64, mean relative error: %.4f)\n",
+                static_cast<num::idx>(n), mean_relative_error);
+    check::done("Lanczos probing remains sparse on a 10,000-state Laplacian");
+}
+
+void test_irreversible_probe_estimator() {
+    constexpr idx n = 3;
+    const num::array<int> states{0, 1, 2};
+    const num::array<idx> rows{0, 0, 0, 1, 1, 1, 2, 2, 2};
+    const num::array<idx> columns{0, 1, 2, 0, 1, 2, 0, 1, 2};
+    // Principal block of the four-state clockwise/counterclockwise cycle with
+    // rates 2 and 1.  Its stationary distribution is uniform, but it is not
+    // reversible because the two cycle fluxes differ.
+    const num::array<real> values{-3.0, 2.0, 0.0, 1.0, -3.0, 2.0, 0.0, 1.0, -3.0};
+    const num::array<else_sim::BoundaryTransition<int>> boundary{{0, 3, 1.0}, {2, 3, 2.0}};
+    const num::vec stationary(n, 1.0);
+    const auto subnetwork =
+        else_sim::make_subnetwork(states, num::spmat::from_triplets(n, n, rows, columns, values),
+                                  boundary, stationary, num::view<const idx>{}, true, false);
+
+    const num::vec exact = else_sim::inverse_diagonal(subnetwork);
+    const num::vec estimate = else_sim::probed_inverse_diagonal(subnetwork, stationary.span(),
+                                                                32768, 20260910u, n, 1e-12, false);
+    for (idx j = 0; j < n; ++j)
+        check::close(estimate[j], exact[j], "irreversible normalized estimator", 0.015);
+    check::done("normalized and symmetrized probing handles irreversible rates");
+}
+
+void test_lowest_scores_selection() {
+    const num::array<real> scores{5.0, 1.0, 3.0, 1.0, 4.0, 0.5};
+    const num::array<idx> protected_states{5, 1};
+
+    const auto chosen = else_sim::lowest_scores(num::view<const real>(scores),
+                                                num::view<const idx>(protected_states), 3);
     check::that(chosen.size() == 3, "returns the requested count");
     check::that(chosen[0] == 3, "smallest eligible score first");
     check::that(chosen[1] == 2, "then the next smallest");
@@ -286,19 +307,19 @@ void test_lowest_scores_selection() {
         check::that(j != 5 && j != 1, "protected states are never shed");
     }
 
-    const auto clamped = elsex::lowest_scores(std::span<const real>(scores),
-                                              std::span<const idx>(protected_states), 99);
+    const auto clamped = else_sim::lowest_scores(num::view<const real>(scores),
+                                                 num::view<const idx>(protected_states), 99);
     check::that(clamped.size() == 4, "count clamps to the eligible set");
     check::done("lowest_scores respects protection, order, and count");
 }
 
 int main() {
-    std::printf("elsex shedding\n");
+    std::printf("else shedding\n");
     test_exact_loss_matches_its_definition();
-    test_exact_loss_matches_legacy();
-    test_expected_entries_matches_legacy();
     test_stationary_normalization_preserves_inverse_diagonal();
     test_probe_estimator_converges();
+    test_sparse_lanczos_estimator_on_large_laplacian();
+    test_irreversible_probe_estimator();
     test_lowest_scores_selection();
-    return check::report("elsex shedding");
+    return check::report("else shedding");
 }
